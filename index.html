@@ -1822,6 +1822,14 @@ function validerActionDeplacement(action) {
     if (action.arrivee.case.nature === "territoire") {
         if (!action.arrivee.case.owner) {
             action.effets.push("conquete_territoire");
+
+            // v95 :
+            // Quand Barbe-Noire conquiert un territoire libre,
+            // il bénéficie immédiatement de la recharge/réparation de territoire.
+            if (acteur === "pirate") {
+                action.effets.push("restituer_quota_territoire_possede");
+                action.effets.push("reparation_territoire_possede");
+            }
         } else if (action.arrivee.case.owner === acteur) {
             action.effets.push("restituer_quota_territoire_possede");
             action.effets.push("reparation_territoire_possede");
@@ -1892,9 +1900,32 @@ function appliquerActionDeplacement(action) {
         action.detailsEffets.push(
             "Tirs reçus du territoire remis à 0"
         );
+
+        if (
+            action.acteur === "pirate" &&
+            action.effets.includes("restituer_quota_territoire_possede")
+        ) {
+            action.detailsEffets.push(
+                "Conquête pirate : recharge/réparation de territoire appliquée immédiatement"
+            );
+        }
     }
 
-    const cleRegen = cleSpotRegeneration(action);
+    let cleRegen = cleSpotRegeneration(action);
+
+    // v95 :
+    // En cas de conquête d'un territoire libre par Barbe-Noire,
+    // la case était encore "libre" dans action.arrivee.case.
+    // On donne donc explicitement la clé de régénération du territoire conquis.
+    if (
+        !cleRegen &&
+        action.acteur === "pirate" &&
+        action.effets.includes("conquete_territoire") &&
+        action.effets.includes("restituer_quota_territoire_possede")
+    ) {
+        cleRegen = "territoire:" + action.arrivee.case.nom;
+    }
+
     const autorisationRegen = analyserAutorisationRegeneration(
         action.acteur,
         cleRegen
@@ -2814,10 +2845,8 @@ function bloquerClicSiReculVisuelTirEnCours() {
         return false;
     }
 
-    afficherMessageAction(
-        "Recul du bateau tireur en cours — attendez 0,3 s avant de rejouer."
-    );
-
+    // Le délai de 0,3 s reste actif, mais sans message affiché :
+    // pendant le recul visuel, le clic est simplement ignoré.
     return true;
 }
 
@@ -4024,8 +4053,8 @@ function estTirDirectSurBateauAvecChance(action) {
     }
 
     // Les batteries de territoires pirates restent une mécanique séparée :
-    // elles tirent au hasard autour du territoire. Si le hasard tombe sur le
-    // bateau, on garde l'effet du tir aléatoire.
+    // elles ont leur propre jet de réussite : 1 chance sur 5 de viser directement
+    // Surcouf, sinon impact réaliste sur une case de mer proche du bateau.
     if (action.choixIA === "batterie_territoire_pirate") {
         return false;
     }
@@ -4650,6 +4679,110 @@ function choisirCaseAleatoireAutour(posTerritoire) {
     return positions[hasardEntier(0, positions.length - 1)];
 }
 
+
+function directionTerritoireVersCible(sourcePos, ciblePos) {
+    return {
+        lig: Math.sign(ciblePos.lig - sourcePos.lig),
+        col: Math.sign(ciblePos.col - sourcePos.col)
+    };
+}
+
+function positionsTirVersBateauDepuisTerritoire(posTerritoire, posBateau) {
+    const direction = directionTerritoireVersCible(posTerritoire, posBateau);
+    const positions = [];
+
+    if (direction.lig === 0 && direction.col === 0) {
+        return positions;
+    }
+
+    // On part des 8 cases autour du territoire.
+    // Les 3 cases "derrière" le territoire, à l'opposé du bateau, sont exclues.
+    // Il reste donc 5 cases : le bateau visé + 4 cases plausibles d'impact.
+    for (let dl = -1; dl <= 1; dl++) {
+        for (let dc = -1; dc <= 1; dc++) {
+            if (dl === 0 && dc === 0) {
+                continue;
+            }
+
+            const produitDirection =
+                dl * direction.lig +
+                dc * direction.col;
+
+            if (produitDirection < 0) {
+                continue;
+            }
+
+            const pos = {
+                lig: posTerritoire.lig + dl,
+                col: posTerritoire.col + dc
+            };
+
+            if (positionDansGrille(pos)) {
+                positions.push(pos);
+            }
+        }
+    }
+
+    return positions;
+}
+
+function caseImpactBatteriePirateAutorisee(pos) {
+    if (!positionDansGrille(pos)) {
+        return false;
+    }
+
+    // Un impact raté ne doit pas être dirigé sur un bateau.
+    if (bateauSurCase(pos)) {
+        return false;
+    }
+
+    const caseInfo = analyserCase(pos);
+
+    // Les impacts ratés sont limités à la mer :
+    // pas de rocher, pas de port, pas de territoire, pas d'île.
+    return caseInfo.nature === "mer";
+}
+
+function choisirCibleRealisteTirTerritoirePirate(territoireAlerte) {
+    const posCorsaire = positionBateau("corsaire");
+    const positions = positionsTirVersBateauDepuisTerritoire(
+        territoireAlerte.pos,
+        posCorsaire
+    );
+
+    if (positions.length === 0) {
+        return null;
+    }
+
+    // 1 chance sur 5 : le tir vise directement le bateau de Surcouf.
+    if (hasardEntier(1, 5) === 1) {
+        return {
+            pos: posCorsaire,
+            type: "bateau_corsaire",
+            commentaire: "tir réaliste : 1 chance sur 5 de toucher directement Surcouf"
+        };
+    }
+
+    const impactsRatesAutorises = positions.filter(function(pos) {
+        if (memePosition(pos, posCorsaire)) {
+            return false;
+        }
+
+        return caseImpactBatteriePirateAutorisee(pos);
+    });
+
+    if (impactsRatesAutorises.length === 0) {
+        return null;
+    }
+
+    return {
+        pos: impactsRatesAutorises[hasardEntier(0, impactsRatesAutorises.length - 1)],
+        type: "impact_mer_autour_soucouf",
+        commentaire: "tir réaliste raté : impact sur une case de mer proche de Surcouf"
+    };
+}
+
+
 function construireTirTerritoirePirate(territoireAlerte) {
     const source = sourceTirActeurSurCase(
         "pirate",
@@ -4660,15 +4793,20 @@ function construireTirTerritoirePirate(territoireAlerte) {
         return null;
     }
 
-    const cible = choisirCaseAleatoireAutour(territoireAlerte.pos);
+    const cibleRealiste = choisirCibleRealisteTirTerritoirePirate(territoireAlerte);
 
-    if (!cible) {
+    if (!cibleRealiste) {
         return null;
     }
 
-    const action = construireActionTir(source, cible);
+    const action = construireActionTir(source, cibleRealiste.pos);
     action.choixIA = "batterie_territoire_pirate";
     action.territoireBatterie = territoireAlerte.nom;
+    action.tirBatterieRealiste = cibleRealiste.type;
+
+    action.detailsEffets.push(
+        "Batterie pirate : " + cibleRealiste.commentaire
+    );
 
     validerActionTir(action);
 
@@ -4980,6 +5118,7 @@ function analyserEtatPourPirate() {
 
         pirateSansTirs: bateauPirate.tirsRestants <= 0 || !bateauPirate.peutTirer,
         piratePeutTirerBateau: bateauPirate.tirsRestants > 0 && bateauPirate.peutTirer,
+        pirateQuotaTirsPlein: bateauPirate.tirsRestants >= bateauPirate.quotaTirs,
 
         territoirePirateProche: territoirePirateProche,
         territoireCorsaireProche: territoireCorsaireProche,
@@ -4991,15 +5130,19 @@ function analyserEtatPourPirate() {
         distanceSurcoufPortCorsaire: distanceSurcoufPortCorsaire(posCorsaire),
         distancePiratePortCorsaire: distanceCases(posPirate, geographie.ports.corsaire),
         distancePiratePortPirate: distanceCases(posPirate, geographie.ports.pirate),
+        distancePirateIle: distanceCases(posPirate, geographie.ile),
+        distanceSurcoufIle: distanceCases(posCorsaire, geographie.ile),
         distanceSurcoufPortAvant: derniereDistanceSurcoufPortAvantMouvement(),
 
         rechargeTirsTerritoirePirate: PARAMS_BATEAUX.pirate.rechargeTirsTerritoire,
         rechargeTirsPortPirate: PARAMS_BATEAUX.pirate.rechargeTirsPort,
         territoirePirateRegenereTirs: PARAMS_BATEAUX.pirate.rechargeTirsTerritoire > 0,
         portPirateRegenereTirs: PARAMS_BATEAUX.pirate.rechargeTirsPort > 0,
+        pirateEndommage: bateauPirate.dommagesRestants < bateauPirate.maxDommages,
+        territoirePirateRepareBateaux: PARAMS_BATEAUX.pirate.reparationTerritoire > 0,
 
         survieInterception: "v61",
-        blocDecisionnelPirate: "v94"
+        blocDecisionnelPirate: "v100"
     };
 
     // Lettres de décision reprises de l'esprit Python.
@@ -5292,10 +5435,14 @@ function listerIntentionsPirate(analyse) {
         !analyse.portPirateRegenereTirs
     );
 
+    const piratePeutReparerSurTerritoireAmi = (
+        analyse.pirateEndommage &&
+        analyse.territoirePirateRepareBateaux &&
+        existeTerritoirePirateAmi
+    );
+
     // 1.1 Barbe-Noire n'a plus de tir.
     if (analyse.pirateSansTirs) {
-        // 1.1.1 Territoire pirate non régénérant ET port pirate non régénérant.
-        // Même si un territoire libre existe, il ne permettrait pas de refaire les tirs.
         if (aucuneRechargeTirsPiratePossible) {
             intentions.push(creerIntentionPirate(
                 "P1_1_1",
@@ -5303,12 +5450,9 @@ function listerIntentionsPirate(analyse) {
                 null,
                 "Barbe-Noire n'a plus de tirs ; ni les territoires pirates ni le port pirate ne régénèrent les tirs"
             ));
-
             return intentions;
         }
 
-        // 1.1.2 Il y a un territoire libre ET la distance Pirate -> territoire libre
-        // est inférieure à la distance Pirate -> port pirate.
         if (territoireLibrePlusProcheQuePortPirate) {
             intentions.push(creerIntentionPirate(
                 "P1_1_2",
@@ -5316,18 +5460,15 @@ function listerIntentionsPirate(analyse) {
                 analyse.territoireLibreProche.pos,
                 "Barbe-Noire n'a plus de tirs ; un territoire libre est plus proche que son port"
             ));
-
             intentions.push(creerIntentionPirate(
-                "P3",
+                "P1_3",
                 "aller_ile",
                 geographie.ile,
                 "Filet de sécurité : l'intention vers le territoire libre n'a pas donné d'action possible"
             ));
-
             return intentions;
         }
 
-        // 1.1.3 Il y a un territoire ami ET le territoire régénère des tirs.
         if (territoirePirateRechargePossible) {
             intentions.push(creerIntentionPirate(
                 "P1_1_3",
@@ -5335,20 +5476,16 @@ function listerIntentionsPirate(analyse) {
                 analyse.territoirePirateProche.pos,
                 "Barbe-Noire n'a plus de tirs ; un territoire pirate ami régénère les tirs"
             ));
-
             intentions.push(creerIntentionPirate(
-                "P3",
+                "P1_3",
                 "aller_ile",
                 geographie.ile,
                 "Filet de sécurité : l'intention de recharge sur territoire n'a pas donné d'action possible"
             ));
-
             return intentions;
         }
 
-        // 1.1.4 Il y a un territoire ami ET le territoire NE régénère PAS les tirs.
         if (existeTerritoirePirateAmi && !analyse.territoirePirateRegenereTirs) {
-            // 1.1.4.1 Le port régénère les tirs.
             if (analyse.portPirateRegenereTirs) {
                 intentions.push(creerIntentionPirate(
                     "P1_1_4_1",
@@ -5356,29 +5493,24 @@ function listerIntentionsPirate(analyse) {
                     geographie.ports.pirate,
                     "Barbe-Noire n'a plus de tirs ; territoire pirate ami non régénérant, mais le port pirate régénère"
                 ));
-
                 intentions.push(creerIntentionPirate(
-                    "P3",
+                    "P1_3",
                     "aller_ile",
                     geographie.ile,
                     "Filet de sécurité : l'intention de recharge au port n'a pas donné d'action possible"
                 ));
-
                 return intentions;
             }
 
-            // 1.1.4.2 Le port NE régénère PAS les tirs.
             intentions.push(creerIntentionPirate(
                 "P1_1_4_2",
                 "victoire_soucouf_sans_recharge_pirate",
                 null,
                 "Barbe-Noire n'a plus de tirs ; territoire pirate ami non régénérant et port pirate non régénérant"
             ));
-
             return intentions;
         }
 
-        // 1.1.5 Il n'y a pas de territoire ami ET le port régénère les tirs.
         if (!existeTerritoirePirateAmi && analyse.portPirateRegenereTirs) {
             intentions.push(creerIntentionPirate(
                 "P1_1_5",
@@ -5386,39 +5518,34 @@ function listerIntentionsPirate(analyse) {
                 geographie.ports.pirate,
                 "Barbe-Noire n'a plus de tirs ; aucun territoire pirate ami, mais le port pirate régénère"
             ));
-
             intentions.push(creerIntentionPirate(
-                "P3",
+                "P1_3",
                 "aller_ile",
                 geographie.ile,
                 "Filet de sécurité : l'intention de recharge au port n'a pas donné d'action possible"
             ));
-
             return intentions;
         }
 
-        // 1.1.6 Il n'y a pas de territoire ami ET le port NE régénère PAS les tirs.
         intentions.push(creerIntentionPirate(
             "P1_1_6",
             "victoire_soucouf_sans_recharge_pirate",
             null,
             "Barbe-Noire n'a plus de tirs ; aucun territoire pirate ami et port pirate non régénérant"
         ));
-
         return intentions;
     }
 
     // 1.2 Barbe-Noire a encore des tirs.
     if (analyse.piratePeutTirerBateau) {
-        // 1.2.1 Surcouf est à portée directe.
+        // 1.2.1 Le bateau de Surcouf est à portée directe.
         if (analyse.surcoufAPorteeBateau) {
             intentions.push(creerIntentionPirate(
                 "P1_2_1",
                 "tirer_sur_soucouf",
                 analyse.posCorsaire,
-                "Surcouf est à portée directe"
+                "Le bateau de Surcouf est à portée directe"
             ));
-
             return intentions;
         }
 
@@ -5439,55 +5566,149 @@ function listerIntentionsPirate(analyse) {
                     "Surcouf porte le trésor ; Barbe-Noire est assez proche du port corsaire pour poursuivre Surcouf"
                 ));
             }
-
             return intentions;
         }
 
         // 1.2.2.2 Surcouf n'a pas de trésor sur son bateau.
-        if (analyse.territoireLibreProche) {
-            if (analyse.territoireLibreProche.distance === 1) {
+        if (analyse.pirateEndommage) {
+            // 1.2.2.2.1 Barbe-Noire a perdu au moins un bateau.
+            if (analyse.territoireLibreProche) {
+                if (analyse.territoireLibreProche.distance === 1) {
+                    intentions.push(creerIntentionPirate(
+                        "P1_2_2_2_1_1_1",
+                        "aller_territoire_libre",
+                        analyse.territoireLibreProche.pos,
+                        "Barbe-Noire a perdu un bateau ; territoire libre à une case : il entre, conquiert et répare immédiatement"
+                    ));
+                    return intentions;
+                }
+
+                if (
+                    piratePeutReparerSurTerritoireAmi &&
+                    analyse.territoirePirateProche.distance < analyse.territoireLibreProche.distance
+                ) {
+                    intentions.push(creerIntentionPirate(
+                        "P1_2_2_2_1_1_2_1",
+                        "aller_territoire_pirate_reparation",
+                        analyse.territoirePirateProche.pos,
+                        "Barbe-Noire a perdu un bateau ; un territoire pirate ami réparateur est plus proche que le territoire libre"
+                    ));
+                    return intentions;
+                }
+
                 intentions.push(creerIntentionPirate(
-                    "P1_2_2_2_1_1",
+                    "P1_2_2_2_1_1_2_2",
                     "aller_territoire_libre",
                     analyse.territoireLibreProche.pos,
-                    "Surcouf ne porte pas de trésor ; territoire libre à une case : Barbe-Noire entre dessus"
+                    "Barbe-Noire a perdu un bateau ; aucun territoire pirate ami réparateur n'est plus proche que le territoire libre"
                 ));
-            } else {
-                intentions.push(creerIntentionPirate(
-                    "P1_2_2_2_1_2",
-                    "aller_territoire_libre",
-                    analyse.territoireLibreProche.pos,
-                    "Surcouf ne porte pas de trésor ; territoire libre à rejoindre"
-                ));
+                return intentions;
             }
 
-            return intentions;
+            if (piratePeutReparerSurTerritoireAmi) {
+                intentions.push(creerIntentionPirate(
+                    "P1_2_2_2_1_2_1",
+                    "aller_territoire_pirate_reparation",
+                    analyse.territoirePirateProche.pos,
+                    "Barbe-Noire a perdu un bateau ; aucun territoire libre, il va vers un territoire pirate ami pour réparer"
+                ));
+                return intentions;
+            }
+
+            if (analyse.territoireCorsaireProche) {
+                if (analyse.territoireCorsaireProche.distance === 1) {
+                    intentions.push(creerIntentionPirate(
+                        "P1_2_2_2_1_2_2_1",
+                        "tirer_territoire_corsaire",
+                        analyse.territoireCorsaireProche.pos,
+                        "Barbe-Noire a perdu un bateau ; aucun territoire ami réparateur, territoire contrôlé par Surcouf à une case"
+                    ));
+                } else {
+                    intentions.push(creerIntentionPirate(
+                        "P1_2_2_2_1_2_2_2",
+                        "aller_territoire_corsaire",
+                        analyse.territoireCorsaireProche.pos,
+                        "Barbe-Noire a perdu un bateau ; aucun territoire ami réparateur, territoire contrôlé par Surcouf à rejoindre"
+                    ));
+                }
+                return intentions;
+            }
         }
 
-        if (analyse.territoireCorsaireProche) {
-            if (analyse.territoireCorsaireProche.distance === 1) {
-                intentions.push(creerIntentionPirate(
-                    "P1_2_2_2_2_1",
-                    "tirer_territoire_corsaire",
-                    analyse.territoireCorsaireProche.pos,
-                    "Surcouf ne porte pas de trésor ; territoire corsaire à une case"
-                ));
-            } else {
-                intentions.push(creerIntentionPirate(
-                    "P1_2_2_2_2_2",
-                    "aller_territoire_corsaire",
-                    analyse.territoireCorsaireProche.pos,
-                    "Surcouf ne porte pas de trésor ; territoire corsaire à rejoindre"
-                ));
+        if (!analyse.pirateEndommage) {
+            // 1.2.2.2.2 Barbe-Noire n'a pas perdu de bateau.
+            if (analyse.territoireLibreProche) {
+                if (analyse.territoireLibreProche.distance === 1) {
+                    intentions.push(creerIntentionPirate(
+                        "P1_2_2_2_2_1_1",
+                        "aller_territoire_libre",
+                        analyse.territoireLibreProche.pos,
+                        "Barbe-Noire n'a pas perdu de bateau ; territoire libre à une case : il entre dessus"
+                    ));
+                } else {
+                    intentions.push(creerIntentionPirate(
+                        "P1_2_2_2_2_1_2",
+                        "aller_territoire_libre",
+                        analyse.territoireLibreProche.pos,
+                        "Barbe-Noire n'a pas perdu de bateau ; territoire libre à rejoindre"
+                    ));
+                }
+                return intentions;
             }
 
-            return intentions;
+            // 1.2.2.2.2.2 Il n'existe pas de territoire libre.
+            // Défense de l'île avant recharge ou attaque de territoire.
+            if (analyse.distanceSurcoufIle <= analyse.distancePirateIle) {
+                intentions.push(creerIntentionPirate(
+                    "P1_2_2_2_2_2_0",
+                    "aller_ile",
+                    geographie.ile,
+                    "Pas de territoire libre ; Surcouf est aussi proche ou plus proche de l'île : Barbe-Noire défend l'île"
+                ));
+                return intentions;
+            }
+
+            // Barbe-Noire est mieux placé que Surcouf pour défendre l'île.
+            // S'il manque des tirs et qu'un territoire pirate ami régénère, il recharge.
+            if (
+                !analyse.pirateQuotaTirsPlein &&
+                territoirePirateRechargePossible
+            ) {
+                intentions.push(creerIntentionPirate(
+                    "P1_2_2_2_2_2_1",
+                    "aller_territoire_pirate_regenerant",
+                    analyse.territoirePirateProche.pos,
+                    "Barbe-Noire n'a pas son quota maximum de tirs ; il va recharger sur son territoire pirate ami le plus proche"
+                ));
+                return intentions;
+            }
+
+            // Si la recharge n'est pas possible ou si le quota est déjà plein,
+            // Barbe-Noire traite le territoire contrôlé par Surcouf.
+            if (analyse.territoireCorsaireProche) {
+                if (analyse.territoireCorsaireProche.distance === 1) {
+                    intentions.push(creerIntentionPirate(
+                        "P1_2_2_2_2_2_2_1",
+                        "tirer_territoire_corsaire",
+                        analyse.territoireCorsaireProche.pos,
+                        "Barbe-Noire ne recharge pas ; territoire contrôlé par Surcouf à une case"
+                    ));
+                } else {
+                    intentions.push(creerIntentionPirate(
+                        "P1_2_2_2_2_2_2_2",
+                        "aller_territoire_corsaire",
+                        analyse.territoireCorsaireProche.pos,
+                        "Barbe-Noire ne recharge pas ; territoire contrôlé par Surcouf à rejoindre"
+                    ));
+                }
+                return intentions;
+            }
         }
     }
 
-    // 3. Filet de sécurité retenu : aller vers l'île.
+    // 1.3 Filet de sécurité retenu : aller vers l'île.
     intentions.push(creerIntentionPirate(
-        "P3",
+        "P1_3",
         "aller_ile",
         geographie.ile,
         "Aucune priorité supérieure ne donne d'action ; Barbe-Noire va vers l'île"
@@ -5571,6 +5792,7 @@ function convertirIntentionPirateEnAction(intention, analyse) {
 
     if (
         intention.intention === "aller_territoire_pirate_regenerant" ||
+        intention.intention === "aller_territoire_pirate_reparation" ||
         intention.intention === "aller_port_pirate_regenerant" ||
         intention.intention === "aller_port_corsaire" ||
         intention.intention === "aller_bateau_soucouf" ||
@@ -5630,7 +5852,7 @@ function choisirActionPirateIA(analyse) {
 function decrireAnalysePirate(analyse, action) {
     const lignes = [];
 
-    lignes.push("IA Barbe-Noire v94 — ignore le territoire qui vient de tirer");
+    lignes.push("IA Barbe-Noire v100 — batteries pirates réalistes");
     lignes.push("Position Pirate : " + coordTexte(analyse.posPirate));
     lignes.push("Position Surcouf : " + coordTexte(analyse.posCorsaire));
     lignes.push("Distance : " + analyse.distanceCorsaire);
@@ -5682,6 +5904,8 @@ function decrireAnalysePirate(analyse, action) {
     lignes.push("F territoire corsaire à portée : " + (analyse.F ? "oui" : "non"));
     lignes.push("G territoire pirate existe : " + (analyse.G ? "oui" : "non"));
     lignes.push("H Pirate sans tirs : " + (analyse.H ? "oui" : "non"));
+    lignes.push("I Barbe-Noire endommagé : " + (analyse.pirateEndommage ? "oui" : "non"));
+    lignes.push("J territoire pirate répare bateaux : " + (analyse.territoirePirateRepareBateaux ? "oui" : "non"));
     lignes.push("Tir direct possible avec munitions : " + (analyse.A ? "oui" : "non"));
     lignes.push(
         "Tir direct géométriquement possible : " +
@@ -5942,7 +6166,7 @@ function afficherDebugEtatPartie() {
 
     lignes.push("Acteur actif : " + nomAfficheActeur(acteurActif));
     lignes.push("Pilotage : Surcouf = " + pilotage.corsaire + " | Barbe-Noire = " + pilotage.pirate);
-    lignes.push("IA Pirate : v94, ignore le territoire corsaire qui vient de tirer — moteur commun inchangé");
+    lignes.push("IA Pirate : v100, batteries pirates réalistes — moteur commun inchangé");
     lignes.push(
         "Batteries pirates : si Surcouf est à 1 case, tir aléatoire toutes les " +
         (DELAI_TIR_TERRITOIRE_PIRATE_MS / 1000) +
@@ -6086,7 +6310,7 @@ function afficherDebugEtatPartie() {
     });
 
     lignes.push("");
-    lignes.push("Note : Mer des Caraïbes 29 x 13 ; v94 Pirate ignore le territoire qui vient de tirer.");
+    lignes.push("Note : Mer des Caraïbes 29 x 13 ; v100 batteries pirates réalistes.");
     lignes.push("Maintenant : clic droit source de tir → clic droit cible. Le bateau consomme 1 tir ; entrée au port ou sur territoire possédé restitue le quota complet ; tir sur bateau adverse = Touché, bateaux restants -1, retour au port ; 2 tirs reçus libèrent un territoire ennemi ; le plateau affiche les tirs restants ; tir depuis bateau = recul d'une case.");
 
     document.getElementById("debugEtat").textContent = lignes.join("\n");
