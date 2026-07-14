@@ -424,6 +424,11 @@
                     de portée une case.
                 </p>
 
+                <p>
+                    <strong>Ports :</strong>
+                    on ne tire pas sur les ports. Un bateau dans son port est donc invulnérable.
+                </p>
+
                 <button id="btnFermerReglesJeu" class="btn-fermer-regles">Fermer</button>
             </div>
         </div>
@@ -3975,6 +3980,14 @@ function validerActionTir(action) {
         return action;
     }
 
+    if (
+        action.cible.case.nature === "port_corsaire" ||
+        action.cible.case.nature === "port_pirate"
+    ) {
+        action.raisonRefus = "On ne tire pas sur les ports";
+        return action;
+    }
+
     if (action.distance === 0) {
         action.raisonRefus = "On ne tire pas sur la case de la source";
         return action;
@@ -5142,7 +5155,7 @@ function analyserEtatPourPirate() {
         territoirePirateRepareBateaux: PARAMS_BATEAUX.pirate.reparationTerritoire > 0,
 
         survieInterception: "v61",
-        blocDecisionnelPirate: "v100"
+        blocDecisionnelPirate: "v101"
     };
 
     // Lettres de décision reprises de l'esprit Python.
@@ -5852,7 +5865,7 @@ function choisirActionPirateIA(analyse) {
 function decrireAnalysePirate(analyse, action) {
     const lignes = [];
 
-    lignes.push("IA Barbe-Noire v100 — batteries pirates réalistes");
+    lignes.push("IA Barbe-Noire v101 — ports invulnérables");
     lignes.push("Position Pirate : " + coordTexte(analyse.posPirate));
     lignes.push("Position Surcouf : " + coordTexte(analyse.posCorsaire));
     lignes.push("Distance : " + analyse.distanceCorsaire);
@@ -6166,7 +6179,7 @@ function afficherDebugEtatPartie() {
 
     lignes.push("Acteur actif : " + nomAfficheActeur(acteurActif));
     lignes.push("Pilotage : Surcouf = " + pilotage.corsaire + " | Barbe-Noire = " + pilotage.pirate);
-    lignes.push("IA Pirate : v100, batteries pirates réalistes — moteur commun inchangé");
+    lignes.push("IA Pirate : v101, ports invulnérables — moteur commun inchangé");
     lignes.push(
         "Batteries pirates : si Surcouf est à 1 case, tir aléatoire toutes les " +
         (DELAI_TIR_TERRITOIRE_PIRATE_MS / 1000) +
@@ -6310,7 +6323,7 @@ function afficherDebugEtatPartie() {
     });
 
     lignes.push("");
-    lignes.push("Note : Mer des Caraïbes 29 x 13 ; v100 batteries pirates réalistes.");
+    lignes.push("Note : Mer des Caraïbes 29 x 13 ; v101 ports invulnérables.");
     lignes.push("Maintenant : clic droit source de tir → clic droit cible. Le bateau consomme 1 tir ; entrée au port ou sur territoire possédé restitue le quota complet ; tir sur bateau adverse = Touché, bateaux restants -1, retour au port ; 2 tirs reçus libèrent un territoire ennemi ; le plateau affiche les tirs restants ; tir depuis bateau = recul d'une case.");
 
     document.getElementById("debugEtat").textContent = lignes.join("\n");
