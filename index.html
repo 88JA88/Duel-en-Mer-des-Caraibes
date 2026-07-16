@@ -146,10 +146,14 @@
         position: fixed;
         inset: 0;
         z-index: 1000;
+        overflow-y: auto;
+        -webkit-overflow-scrolling: touch;
+        box-sizing: border-box;
+        padding: 28px 0;
     }
 
     .modal-fond {
-        position: absolute;
+        position: fixed;
         inset: 0;
         background: rgba(0, 0, 0, 0.35);
     }
@@ -157,8 +161,12 @@
     .modal-parametres {
         position: relative;
         width: min(760px, calc(100vw - 48px));
-        margin: 28px auto;
-        padding: 20px 26px;
+        max-height: calc(100vh - 56px);
+        margin: 0 auto;
+        padding: 20px 26px 24px 26px;
+        overflow-y: auto;
+        -webkit-overflow-scrolling: touch;
+        box-sizing: border-box;
         border-radius: 14px;
         background: #eeeeee;
         box-shadow: 0 8px 28px rgba(0,0,0,0.35);
@@ -175,13 +183,13 @@
     .parametres-grille {
         display: grid;
         grid-template-columns: minmax(280px, 1fr) 120px;
-        gap: 16px 24px;
+        gap: 6px 20px;
         align-items: center;
     }
 
     .parametres-grille label {
         margin: 0;
-        font-size: 22px;
+        font-size: 18px;
     }
 
     .parametres-grille input[type="number"] {
@@ -6815,7 +6823,7 @@ function tirTerritoireCorsaireAvecTresorInterditParAvanceSurcouf(posSurcouf, ter
         return false;
     }
 
-    const MARGE_ARRIVEE_TRESOR = 3;
+    const MARGE_ARRIVEE_TRESOR = 4;
 
     const territoireEtat = etatPartie.territoires[territoireCandidat.nom];
     const tirsRecus = territoireEtat && Number.isFinite(territoireEtat.tirsRecus)
@@ -6959,7 +6967,7 @@ function analyserEtatPourPirate() {
         territoirePirateRepareBateaux: PARAMS_BATEAUX.pirate.reparationTerritoire > 0,
 
         survieInterception: "v61",
-        blocDecisionnelPirate: "v243_delai_entree_batteries"
+        blocDecisionnelPirate: "v246_parametres_scroll"
     };
 
     // Lettres de décision reprises de l'esprit Python.
@@ -7836,6 +7844,7 @@ function decrireAnalysePirate(analyse, action) {
     const lignes = [];
 
     lignes.push("IA Barbe-Noire — réaction après déplacement ou tir de Surcouf");
+    lignes.push("Interface v246 : fenêtre Paramètres défilante");
     lignes.push("Position Pirate : " + coordTexte(analyse.posPirate));
     lignes.push("Position Surcouf : " + coordTexte(analyse.posCorsaire));
     lignes.push("Distance : " + analyse.distanceCorsaire);
