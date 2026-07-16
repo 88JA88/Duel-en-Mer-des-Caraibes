@@ -728,6 +728,7 @@ let timerTirsTerritoiresPirates = null;
 let tirsTerritoiresPiratesActifs = true;
 let tirTerritoirePirateEnCours = false;
 let dernierTirTerritoirePirate = null;
+let debutAlerteTerritoiresPirates = {};
 
 // Le cordon défensif pirate est mémorisé.
 // Il ne dépend pas de la position des bateaux.
@@ -1921,6 +1922,10 @@ function appliquerActionDeplacement(action) {
             "déplacement de Surcouf vers " + coordTexte(action.arrivee.pos),
             action.detailsEffets
         );
+
+        // Si Surcouf vient d'entrer à côté d'un territoire pirate,
+        // le premier tir automatique ne sera autorisé qu'après un délai complet.
+        actualiserDelaiAlerteTerritoiresPirates();
     }
 
     action.detailsEffets.push(
@@ -4866,6 +4871,56 @@ function territoiresPiratesAlertes() {
     return alertes;
 }
 
+function reinitialiserDelaiAlerteTerritoiresPirates() {
+    debutAlerteTerritoiresPirates = {};
+}
+
+function actualiserDelaiAlerteTerritoiresPiratesDepuisAlertes(alertes) {
+    const maintenant = Date.now();
+    const territoiresActuellementEnAlerte = new Set();
+
+    alertes.forEach(function(alerte) {
+        territoiresActuellementEnAlerte.add(alerte.nom);
+
+        if (!debutAlerteTerritoiresPirates[alerte.nom]) {
+            debutAlerteTerritoiresPirates[alerte.nom] = maintenant;
+        }
+    });
+
+    Object.keys(debutAlerteTerritoiresPirates).forEach(function(nomTerritoire) {
+        if (!territoiresActuellementEnAlerte.has(nomTerritoire)) {
+            delete debutAlerteTerritoiresPirates[nomTerritoire];
+        }
+    });
+}
+
+function actualiserDelaiAlerteTerritoiresPirates() {
+    if (!etatPartie || !geographie) {
+        return;
+    }
+
+    actualiserDelaiAlerteTerritoiresPiratesDepuisAlertes(
+        territoiresPiratesAlertes()
+    );
+}
+
+function alertesTerritoiresPiratesEligiblesApresDelaiEntree(alertes) {
+    const maintenant = Date.now();
+
+    actualiserDelaiAlerteTerritoiresPiratesDepuisAlertes(alertes);
+
+    return alertes.filter(function(alerte) {
+        const debutAlerte = debutAlerteTerritoiresPirates[alerte.nom];
+
+        if (!debutAlerte) {
+            return false;
+        }
+
+        return maintenant - debutAlerte >= DELAI_TIR_TERRITOIRE_PIRATE_MS;
+    });
+}
+
+
 function choisirCaseAleatoireAutour(posTerritoire) {
     const positions = positionsAutourDeTerritoire(posTerritoire);
 
@@ -5036,13 +5091,21 @@ function activationTirsTerritoiresPirates() {
 
     if (alertes.length === 0) {
         dernierTirTerritoirePirate = null;
+        reinitialiserDelaiAlerteTerritoiresPirates();
+        planifierTirsTerritoiresPirates();
+        return;
+    }
+
+    const alertesEligibles = alertesTerritoiresPiratesEligiblesApresDelaiEntree(alertes);
+
+    if (alertesEligibles.length === 0) {
         planifierTirsTerritoiresPirates();
         return;
     }
 
     tirTerritoirePirateEnCours = true;
 
-    const territoireAlerte = alertes[hasardEntier(0, alertes.length - 1)];
+    const territoireAlerte = alertesEligibles[hasardEntier(0, alertesEligibles.length - 1)];
     const action = construireTirTerritoirePirate(territoireAlerte);
 
     if (action) {
@@ -5101,6 +5164,7 @@ function planifierTirsTerritoiresPirates() {
 function demarrerTirsTerritoiresPirates() {
     tirsTerritoiresPiratesActifs = true;
     tirTerritoirePirateEnCours = false;
+    reinitialiserDelaiAlerteTerritoiresPirates();
     planifierTirsTerritoiresPirates();
 }
 
@@ -5112,6 +5176,7 @@ function arreterTirsTerritoiresPirates() {
 
     tirsTerritoiresPiratesActifs = false;
     tirTerritoirePirateEnCours = false;
+    reinitialiserDelaiAlerteTerritoiresPirates();
 }
 
 
@@ -6750,20 +6815,36 @@ function tirTerritoireCorsaireAvecTresorInterditParAvanceSurcouf(posSurcouf, ter
         return false;
     }
 
+    const MARGE_ARRIVEE_TRESOR = 3;
+
     const territoireEtat = etatPartie.territoires[territoireCandidat.nom];
-    const tirsPourLiberer = territoireEtat && territoireEtat.tirsNecessaires
-        ? territoireEtat.tirsNecessaires
-        : TIRS_NECESSAIRES_LIBERER_TERRITOIRE;
+    const tirsRecus = territoireEtat && Number.isFinite(territoireEtat.tirsRecus)
+        ? territoireEtat.tirsRecus
+        : 0;
+
+    // Décision prise avant le tir courant :
+    // on compte les tirs qui restent à faire pour libérer le territoire.
+    const tirsRestantsPourLiberer = Math.max(
+        1,
+        TIRS_NECESSAIRES_LIBERER_TERRITOIRE - tirsRecus
+    );
 
     const distanceSurcoufPort = distanceSurcoufPortCorsaire(posSurcouf);
-    const distanceTerritoirePort = distanceCases(territoireCandidat.pos, geographie.ports.corsaire);
+    const distanceTerritoirePort = distanceCases(
+        territoireCandidat.pos,
+        geographie.ports.corsaire
+    );
 
-    // Règle : si Surcouf est déjà suffisamment avancé vers son port,
-    // le tir sur territoire arrive trop tard.
-    // Avec 3 tirs nécessaires : seuil = distance territoire-port - 1.
-    const seuilInterdiction = distanceTerritoirePort - (tirsPourLiberer - 2);
+    const tempsSurcoufDisponible = distanceSurcoufPort - MARGE_ARRIVEE_TRESOR;
 
-    return distanceSurcoufPort <= seuilInterdiction;
+    // Barbe-Noire marche deux fois plus vite que Surcouf.
+    // On arrondit au supérieur : 5 cases demandent 3 coups.
+    const tempsPirateApresTerritoire =
+        tirsRestantsPourLiberer +
+        1 + // entrer sur le territoire une fois libéré
+        Math.ceil(distanceTerritoirePort / 2);
+
+    return tempsPirateApresTerritoire > tempsSurcoufDisponible;
 }
 
 
@@ -6878,7 +6959,7 @@ function analyserEtatPourPirate() {
         territoirePirateRepareBateaux: PARAMS_BATEAUX.pirate.reparationTerritoire > 0,
 
         survieInterception: "v61",
-        blocDecisionnelPirate: "v241_tir_territoire_tresor"
+        blocDecisionnelPirate: "v243_delai_entree_batteries"
     };
 
     // Lettres de décision reprises de l'esprit Python.
