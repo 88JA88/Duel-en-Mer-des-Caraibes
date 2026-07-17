@@ -436,7 +436,10 @@
                     <strong>Ports et île :</strong>
                     on ne tire pas sur les ports ni sur l’île. Un bateau dans son port ou sur l’île est donc invulnérable.
                 </p>
-
+                <p>
+                    <strong>Bateau coulé :</strong>
+                    Lorsqu'un bateau est coulé un autre est mis à flot à partir d'un territoire ou du port.
+                </p>
                 <button id="btnFermerReglesJeu" class="btn-fermer-regles">Fermer</button>
             </div>
         </div>
@@ -719,11 +722,6 @@ let timerReponsePirateApresDeplacement = null;
 // avant que Pirate ait analysé la situation.
 const DELAI_REPONSE_PIRATE_APRES_TIR_CORSAIRE_MS = 360;
 let timerReponsePirateApresTirCorsaire = null;
-
-// Mémoire courte anti-boucle.
-// Si Surcouf tire directement sur Barbe-Noire et le manque,
-// Barbe-Noire évite de revenir immédiatement à distance 1 de Surcouf.
-let evasionPirateApresTirCorsaireRate = null;
 
 // Réaction immédiate anti-obstination.
 // Si un territoire corsaire vient de tirer sur Barbe-Noire,
@@ -1631,6 +1629,84 @@ function renvoyerBateauAuPort(acteur) {
     };
 }
 
+// Variante v246 : après un bateau touché, le nouveau bateau existe directement
+// sur le territoire possédé le plus proche de l'île ; à défaut, dans son port.
+// Ce changement est un nouvel état de partie, jamais une entrée ni un déplacement :
+// aucune recharge de territoire, réparation, conquête ou progression du verrou.
+function reapparaitreBateauSurTerritoireOuPort(acteur) {
+    const bateau = etatPartie.bateaux[acteur];
+    const anciennePosition = {
+        lig: bateau.lig,
+        col: bateau.col
+    };
+
+    let destination = null;
+
+    for (const nom of Object.keys(etatPartie.territoires)) {
+        const territoireEtat = etatPartie.territoires[nom];
+
+        if (!territoireEtat || territoireEtat.owner !== acteur) {
+            continue;
+        }
+
+        const territoireGeo = geographie.territoires[nom];
+
+        if (!territoireGeo) {
+            continue;
+        }
+
+        const candidat = {
+            type: "territoire",
+            nom: nom,
+            pos: {
+                lig: territoireGeo.lig,
+                col: territoireGeo.col
+            },
+            distanceIle: distanceCases(territoireGeo, geographie.ile)
+        };
+
+        if (!destination || candidat.distanceIle < destination.distanceIle) {
+            destination = candidat;
+        }
+    }
+
+    if (!destination) {
+        destination = {
+            type: "port",
+            nom: "port_" + acteur,
+            pos: positionPortActeur(acteur),
+            distanceIle: null
+        };
+    }
+
+    // Modification directe de l'état : aucun appel au moteur de déplacement.
+    bateau.lig = destination.pos.lig;
+    bateau.col = destination.pos.col;
+
+    // Ces mémoires dépendent des positions des deux bateaux.
+    // Leur recalcul ne constitue pas une entrée sur la case d'arrivée.
+    recalculerPorteCordonProcheSurcouf(
+        "réapparition du nouveau bateau " + nomAfficheActeur(acteur)
+    );
+
+    // Si Surcouf réapparaît à portée d'une batterie pirate,
+    // le délai initial complet de 0,5 seconde repart de cette nouvelle position.
+    if (acteur === "corsaire") {
+        actualiserDelaiAlerteTerritoiresPirates();
+    }
+
+    return {
+        anciennePosition: anciennePosition,
+        nouvellePosition: {
+            lig: destination.pos.lig,
+            col: destination.pos.col
+        },
+        typeDestination: destination.type,
+        nomDestination: destination.nom,
+        distanceIle: destination.distanceIle
+    };
+}
+
 function remettreTirsRecusTerritoiresAdversesAuDepart(acteurTouche) {
     const ownerAdverse = adversaireDe(acteurTouche);
     const resets = [];
@@ -1940,12 +2016,6 @@ function appliquerActionDeplacement(action) {
         "Déplacements depuis sortie du spot verrouillé : " +
         bateau.deplacementsDepuisRegeneration
     );
-
-    if (action.evitementApresTirRate) {
-        action.detailsEffets.push(
-            "Évitement après tir raté : Barbe-Noire reste à plus d'une case de Surcouf"
-        );
-    }
 
     if (action.antiPiegeProximiteSurcouf) {
         action.detailsEffets.push(
@@ -4252,6 +4322,26 @@ function planifierResolutionTirBateauApresImpact(action) {
     resolutionTirBateauDiffereeEnCours = true;
     action.resolutionTirBateauDifferee = true;
 
+    // v251 — dès le début d'un tir direct humain de Surcouf,
+    // annuler toute réponse pirate encore programmée par l'action précédente.
+    // Sinon ce timer peut expirer pendant les 380 ms d'impact et déplacer
+    // le nouveau bateau aussitôt après sa réapparition.
+    if (tirHumainCorsaireAutorise(action)) {
+        if (timerReponsePirateApresTirCorsaire !== null) {
+            clearTimeout(timerReponsePirateApresTirCorsaire);
+            timerReponsePirateApresTirCorsaire = null;
+        }
+
+        if (timerReponsePirateApresDeplacement !== null) {
+            clearTimeout(timerReponsePirateApresDeplacement);
+            timerReponsePirateApresDeplacement = null;
+        }
+
+        action.detailsEffets.push(
+            "Tir direct de Surcouf : ancienne réponse pirate en attente annulée avant l'impact"
+        );
+    }
+
     action.detailsEffets.push(
         "Résolution différée de " +
         DELAI_RESOLUTION_TIR_BATEAU_MS +
@@ -4283,7 +4373,11 @@ function planifierResolutionTirBateauApresImpact(action) {
 
 function appliquerResolutionPostImpactTir(action, options = {}) {
     appliquerReculCibleBateauRate(action);
-    memoriserTerritoireCorsaireQuiVientDeTirerPirate(action);
+
+    // v249 — essai : anti-obstination territoriale neutralisée.
+    // Un territoire corsaire qui vient de tirer sur Barbe-Noire
+    // reste donc pris en compte dès la décision pirate suivante.
+    // memoriserTerritoireCorsaireQuiVientDeTirerPirate(action);
 
     if (action.effets.includes("toucher_bateau_adverse")) {
         if (action.cibleBateau === "corsaire" && surcoufPorteTresor()) {
@@ -4320,19 +4414,26 @@ function appliquerResolutionPostImpactTir(action, options = {}) {
             cible.dommagesRestants
         );
 
-        const retourPort = renvoyerBateauAuPort(action.cibleBateau);
+        const reapparition = reapparaitreBateauSurTerritoireOuPort(
+            action.cibleBateau
+        );
 
         action.detailsEffets.push(
-            "Bateau touché renvoyé au port : " +
-            coordTexte(retourPort.anciennePosition) +
+            "Nouveau bateau créé " +
+            (reapparition.typeDestination === "territoire"
+                ? "sur " + reapparition.nomDestination
+                : "dans son port") +
+            " : " +
+            coordTexte(reapparition.anciennePosition) +
             " → " +
-            coordTexte(retourPort.nouvellePosition)
+            coordTexte(reapparition.nouvellePosition) +
+            " (nouvel état, sans entrée ni déplacement)"
         );
 
         const regenTirs = regenererQuotaTirsNouveauBateau(action.cibleBateau);
 
         action.detailsEffets.push(
-            "Nouveau bateau au port : tirs régénérés " +
+            "Nouveau bateau : tirs régénérés " +
             regenTirs.avant +
             " → " +
             regenTirs.apres +
@@ -4769,39 +4870,6 @@ function positionsAutourDeTerritoire(posTerritoire) {
     }
 
     return positions;
-}
-
-function enregistrerEvasionPirateApresTirCorsaireRate(action, destinationEffective) {
-    if (
-        !action ||
-        action.acteur !== "corsaire" ||
-        action.cibleBateauRatee !== "pirate"
-    ) {
-        return;
-    }
-
-    evasionPirateApresTirCorsaireRate = {
-        active: true,
-        depart: action.reculCibleRate && action.reculCibleRate.depart
-            ? cloneSimple(action.reculCibleRate.depart)
-            : cloneSimple(action.cible.pos),
-        destination: destinationEffective
-            ? cloneSimple(destinationEffective)
-            : cloneSimple(positionBateau("pirate")),
-        positionSurcoufAuTir: cloneSimple(positionBateau("corsaire")),
-        creeeLe: Date.now()
-    };
-}
-
-function pirateDoitEviterContactApresTirRate() {
-    return !!(
-        evasionPirateApresTirCorsaireRate &&
-        evasionPirateApresTirCorsaireRate.active
-    );
-}
-
-function effacerEvasionPirateApresTirRate() {
-    evasionPirateApresTirCorsaireRate = null;
 }
 
 function memoriserTerritoireCorsaireQuiVientDeTirerPirate(action) {
@@ -6813,7 +6881,11 @@ function trouverTerritoireCorsaireAPorteeTirPirate(posPirate) {
     return candidats.length > 0 ? candidats[0] : null;
 }
 
-function tirTerritoireCorsaireAvecTresorInterditParAvanceSurcouf(posSurcouf, territoireCandidat) {
+function attaqueTerritoireCorsaireAvecTresorInterditeParTemps(
+    posPirate,
+    posSurcouf,
+    territoireCandidat
+) {
     if (!territoireCandidat) {
         return false;
     }
@@ -6830,7 +6902,7 @@ function tirTerritoireCorsaireAvecTresorInterditParAvanceSurcouf(posSurcouf, ter
         ? territoireEtat.tirsRecus
         : 0;
 
-    // Décision prise avant le tir courant :
+    // Décision prise avant le premier tir :
     // on compte les tirs qui restent à faire pour libérer le territoire.
     const tirsRestantsPourLiberer = Math.max(
         1,
@@ -6838,6 +6910,10 @@ function tirTerritoireCorsaireAvecTresorInterditParAvanceSurcouf(posSurcouf, ter
     );
 
     const distanceSurcoufPort = distanceSurcoufPortCorsaire(posSurcouf);
+    const distancePirateTerritoire = distanceCases(
+        posPirate,
+        territoireCandidat.pos
+    );
     const distanceTerritoirePort = distanceCases(
         territoireCandidat.pos,
         geographie.ports.corsaire
@@ -6845,14 +6921,19 @@ function tirTerritoireCorsaireAvecTresorInterditParAvanceSurcouf(posSurcouf, ter
 
     const tempsSurcoufDisponible = distanceSurcoufPort - MARGE_ARRIVEE_TRESOR;
 
-    // Barbe-Noire marche deux fois plus vite que Surcouf.
-    // On arrondit au supérieur : 5 cases demandent 3 coups.
-    const tempsPirateApresTerritoire =
+    // Barbe-Noire marche deux fois plus vite que Surcouf lorsque le trésor est porté.
+    // Il doit d'abord rejoindre une case située à portée 1 du territoire.
+    const tempsPiratePourAtteindrePorteeTir = Math.ceil(
+        Math.max(0, distancePirateTerritoire - PORTEE_TIR) / 2
+    );
+
+    const tempsPirateTotal =
+        tempsPiratePourAtteindrePorteeTir +
         tirsRestantsPourLiberer +
         1 + // entrer sur le territoire une fois libéré
         Math.ceil(distanceTerritoirePort / 2);
 
-    return tempsPirateApresTerritoire > tempsSurcoufDisponible;
+    return tempsPirateTotal > tempsSurcoufDisponible;
 }
 
 
@@ -6898,8 +6979,15 @@ function analyserEtatPourPirate() {
         trouverTerritoireCorsaireColonneInferieureSurcouf(posCorsaire, posPirate);
     const territoireCorsaireAPorteeTirPirate =
         trouverTerritoireCorsaireAPorteeTirPirate(posPirate);
+    const attaqueTerritoireCorsaireProcheAvecTresorInterdite =
+        attaqueTerritoireCorsaireAvecTresorInterditeParTemps(
+            posPirate,
+            posCorsaire,
+            territoireCorsaireProche
+        );
     const tirTerritoireCorsaireAvecTresorInterdit =
-        tirTerritoireCorsaireAvecTresorInterditParAvanceSurcouf(
+        attaqueTerritoireCorsaireAvecTresorInterditeParTemps(
+            posPirate,
             posCorsaire,
             territoireCorsaireAPorteeTirPirate
         );
@@ -6911,8 +6999,6 @@ function analyserEtatPourPirate() {
         posCorsaire: posCorsaire,
         distanceCorsaire: distanceCases(posPirate, posCorsaire),
         distanceMaxDeplacementPirate: distanceMaxDeplacementPirateIA(),
-        evasionApresTirRateActive: pirateDoitEviterContactApresTirRate(),
-
         corsairePorteTresor: etatPartie.tresor.porteur === "corsaire",
         tresorSurIleADefendre: (
             etatPartie.tresor.presentSurIle &&
@@ -6946,6 +7032,7 @@ function analyserEtatPourPirate() {
         caseProvocationTresorHorsCordon: caseProvocationTresorHorsCordon,
         territoireCorsaireColonneInferieureSurcouf: territoireCorsaireColonneInferieureSurcouf,
         territoireCorsaireAPorteeTirPirate: territoireCorsaireAPorteeTirPirate,
+        attaqueTerritoireCorsaireProcheAvecTresorInterdite: attaqueTerritoireCorsaireProcheAvecTresorInterdite,
         tirTerritoireCorsaireAvecTresorInterdit: tirTerritoireCorsaireAvecTresorInterdit,
         pirateColonnePlusEleveeQueSurcouf: posPirate.col > posCorsaire.col,
         surcoufHorsPerimetreInterieurPirate: surcoufHorsPerimetreInterieurPirate,
@@ -7125,7 +7212,6 @@ function construireActionDeplacementPirateVers(objectif, libelle, options = {}) 
     const acteur = "pirate";
     const depart = positionBateau(acteur);
     const distanceMax = distanceMaxDeplacementPirateIA();
-    const evasionActive = pirateDoitEviterContactApresTirRate();
     const posCorsaire = positionBateau("corsaire");
     const surcoufAvecTresor = surcoufPorteTresor();
 
@@ -7165,27 +7251,12 @@ function construireActionDeplacementPirateVers(objectif, libelle, options = {}) 
             return true;
         });
 
-    let evasionAppliquee = false;
     let antiPiegeProximiteApplique = false;
     let antiPiegeProximiteDernierRecours = false;
     let deplacementDeuxCasesTresorApplique = false;
     let deplacementDeuxCasesTresorDernierRecours = false;
 
-    if (evasionActive && !options.autoriserProximiteSurcouf) {
-        const candidatsEloignes = candidats.filter(function(candidat) {
-            return candidat.distanceSurcoufApresDeplacement > 1;
-        });
-
-        if (candidatsEloignes.length > 0) {
-            candidats = candidatsEloignes;
-            evasionAppliquee = true;
-        } else {
-            // Anti-boucle stricte :
-            // si aucune case ne permet d'être à plus d'une case de Surcouf,
-            // Barbe-Noire ne revient pas volontairement au contact.
-            return null;
-        }
-    } else if (!options.autoriserProximiteSurcouf) {
+    if (!options.autoriserProximiteSurcouf) {
         // Anti-proximité permanent.
         // Barbe-Noire peut tirer s'il est déjà à portée de Surcouf,
         // mais il évite de terminer volontairement un déplacement à 1 case ou moins de Surcouf,
@@ -7252,7 +7323,6 @@ function construireActionDeplacementPirateVers(objectif, libelle, options = {}) 
     action.distanceMaxAutorisee = distanceMax;
     action.distanceDeplacementIA = candidats[0].distanceDeplacement;
     action.distanceSurcoufApresDeplacementIA = candidats[0].distanceSurcoufApresDeplacement;
-    action.evitementApresTirRate = evasionAppliquee;
     action.antiPiegeProximiteSurcouf = antiPiegeProximiteApplique;
     action.antiPiegeProximiteDernierRecours = antiPiegeProximiteDernierRecours;
     action.deplacementDeuxCasesTresor = deplacementDeuxCasesTresorApplique;
@@ -7443,11 +7513,17 @@ function listerIntentionsPirate(analyse) {
         // - un territoire corsaire existe ;
         // - Surcouf est hors du périmètre intérieur ;
         // - Barbe-Noire est placé plus à droite que Surcouf.
-        // Important : ce bloc ne teste pas encore si Surcouf porte le trésor.
+        // Si Surcouf porte le trésor, Barbe-Noire ne se détourne que s'il a
+        // le temps de rejoindre la portée de tir, libérer le territoire, y entrer,
+        // puis atteindre le port corsaire avant la marge d'arrivée de 4 cases.
         if (
             analyse.territoireCorsaireProche &&
             analyse.surcoufHorsPerimetreInterieurPirate &&
-            analyse.pirateColonnePlusEleveeQueSurcouf
+            analyse.pirateColonnePlusEleveeQueSurcouf &&
+            (
+                !analyse.corsairePorteTresor ||
+                !analyse.attaqueTerritoireCorsaireProcheAvecTresorInterdite
+            )
         ) {
             if (analyse.territoireCorsaireProche.distance === 1) {
                 intentions.push(creerIntentionPirate(
@@ -7854,11 +7930,6 @@ function decrireAnalysePirate(analyse, action) {
         " case" +
         (analyse.distanceMaxDeplacementPirate > 1 ? "s" : "")
     );
-    lignes.push(
-        "Évitement après tir raté : " +
-        (analyse.evasionApresTirRateActive ? "actif" : "non")
-    );
-
     lignes.push("");
     lignes.push("Analyse périmètre pirate :");
     lignes.push(
@@ -8068,12 +8139,6 @@ function decrireAnalysePirate(analyse, action) {
             );
         }
 
-        if (action.evitementApresTirRate) {
-            lignes.push(
-                "Évitement appliqué : Barbe-Noire ne revient pas à distance 1"
-            );
-        }
-
         if (action.deplacementDeuxCasesTresor) {
             lignes.push(
                 "Interception trésor : déplacement de 2 cases imposé"
@@ -8131,6 +8196,21 @@ function planifierReponsePirateApresTirCorsaire(action, raison) {
     if (timerReponsePirateApresDeplacement !== null) {
         clearTimeout(timerReponsePirateApresDeplacement);
         timerReponsePirateApresDeplacement = null;
+    }
+
+    // Un bateau pirate nouvellement créé sur un territoire ou dans son port
+    // constitue un nouvel état de partie. Il ne joue pas immédiatement dans
+    // la continuité du tir de Surcouf qui vient de détruire le bateau précédent.
+    if (
+        action.effets.includes("toucher_bateau_adverse") &&
+        action.cibleBateau === "pirate"
+    ) {
+        action.detailsEffets.push(
+            "Barbe-Noire touché : le nouveau bateau reste sur son point de réapparition ; aucune réponse pirate immédiate"
+        );
+
+        afficherDebugAction(action);
+        return;
     }
 
     action.detailsEffets.push(
@@ -8212,8 +8292,7 @@ function activationPirateIA() {
         executerActionFinPartieStrategique(action);
     }
 
-    // Les mémoires anti-boucle ne valent que pour la prochaine réponse IA.
-    effacerEvasionPirateApresTirRate();
+    // La mémoire territoriale éventuelle ne vaut que pour la prochaine réponse IA.
     effacerTerritoireCorsaireIgnoreDecisionPirate();
 
     if (partieTerminee()) {
