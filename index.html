@@ -790,9 +790,18 @@ let resolutionTirBateauDiffereeEnCours = false;
 // Tap court = clic normal, donc déplacement.
 const DELAI_APPUI_LONG_TIR_MS = 550;
 const SEUIL_DEPLACEMENT_TOUCH_PX = 12;
+
+// v254 — sur écran tactile seulement : après le premier tir par appui long,
+// une tentative de nouveau tir est faite régulièrement tant que le doigt reste posé.
+// Le moteur existant conserve ses propres blocages (résolution du tir,
+// réponse pirate, fin de partie), donc aucun tir ne peut les contourner.
+const DELAI_REESSAI_TIR_MAINTENU_MS = 80;
+
 let timerAppuiLongTir = null;
+let timerTirMaintenu = null;
 let departTouchTir = null;
 let appuiLongTirDeclenche = false;
+let tirMaintenuActif = false;
 let ignorerProchainClicCanvas = false;
 
 // Test IA volontairement simple et propre :
@@ -9067,6 +9076,18 @@ function annulerTimerAppuiLongTir() {
     }
 }
 
+function annulerTimerTirMaintenu() {
+    if (timerTirMaintenu) {
+        clearTimeout(timerTirMaintenu);
+        timerTirMaintenu = null;
+    }
+}
+
+function arreterTirMaintenu() {
+    tirMaintenuActif = false;
+    annulerTimerTirMaintenu();
+}
+
 function distanceTouchDepuisDepart(touch) {
     if (!departTouchTir || !touch) {
         return 0;
@@ -9078,13 +9099,10 @@ function distanceTouchDepuisDepart(touch) {
     return Math.sqrt(dx * dx + dy * dy);
 }
 
-function declencherTirParAppuiLong() {
+function executerTirDepuisPositionAppuiLong() {
     if (!departTouchTir) {
         return;
     }
-
-    appuiLongTirDeclenche = true;
-    ignorerProchainClicCanvas = true;
 
     const fauxEvenementClicDroit = {
         clientX: departTouchTir.x,
@@ -9092,13 +9110,63 @@ function declencherTirParAppuiLong() {
         preventDefault: function() {}
     };
 
+    // Même moteur que le clic droit de l'ordinateur.
+    // Le gestionnaire "contextmenu" lui-même reste inchangé.
     gererClicDroitCanvas(fauxEvenementClicDroit);
+}
+
+function programmerProchaineTentativeTirMaintenu() {
+    if (!tirMaintenuActif || !departTouchTir) {
+        return;
+    }
+
+    annulerTimerTirMaintenu();
+
+    timerTirMaintenu = setTimeout(function() {
+        timerTirMaintenu = null;
+
+        if (!tirMaintenuActif || !departTouchTir) {
+            return;
+        }
+
+        if (partieTerminee()) {
+            arreterTirMaintenu();
+            return;
+        }
+
+        // Tant que le moteur résout un tir ou attend la réponse pirate,
+        // on patiente sans afficher de message de refus.
+        if (!bloquerClicSiReculVisuelTirEnCours()) {
+            executerTirDepuisPositionAppuiLong();
+        }
+
+        // Une nouvelle tentative sera faite dès que le moteur sera libre.
+        programmerProchaineTentativeTirMaintenu();
+    }, DELAI_REESSAI_TIR_MAINTENU_MS);
+}
+
+function declencherTirParAppuiLong() {
+    if (!departTouchTir) {
+        return;
+    }
+
+    appuiLongTirDeclenche = true;
+    tirMaintenuActif = true;
+    ignorerProchainClicCanvas = true;
+
+    // Premier tir après les 550 ms de l'appui long.
+    executerTirDepuisPositionAppuiLong();
+
+    // Puis répétition sur la même case jusqu'au relâchement du doigt.
+    programmerProchaineTentativeTirMaintenu();
 }
 
 function gererTouchStartCanvas(event) {
     if (!event.touches || event.touches.length !== 1) {
         annulerTimerAppuiLongTir();
+        arreterTirMaintenu();
         departTouchTir = null;
+        appuiLongTirDeclenche = false;
         return;
     }
 
@@ -9110,6 +9178,7 @@ function gererTouchStartCanvas(event) {
     };
 
     appuiLongTirDeclenche = false;
+    arreterTirMaintenu();
     annulerTimerAppuiLongTir();
 
     timerAppuiLongTir = setTimeout(function() {
@@ -9121,22 +9190,26 @@ function gererTouchStartCanvas(event) {
 function gererTouchMoveCanvas(event) {
     if (!departTouchTir || !event.touches || event.touches.length !== 1) {
         annulerTimerAppuiLongTir();
+        arreterTirMaintenu();
         return;
     }
 
     const touch = event.touches[0];
 
     if (distanceTouchDepuisDepart(touch) > SEUIL_DEPLACEMENT_TOUCH_PX) {
+        // Le doigt a quitté la case visée : aucun nouveau tir n'est lancé.
         annulerTimerAppuiLongTir();
+        arreterTirMaintenu();
     }
 }
 
 function gererTouchEndCanvas(event) {
     annulerTimerAppuiLongTir();
+    arreterTirMaintenu();
 
     if (appuiLongTirDeclenche) {
         // Empêche le navigateur d'envoyer ensuite un clic normal,
-        // qui déplacerait Surcouf juste après le tir.
+        // qui déplacerait Surcouf juste après le dernier tir.
         if (event && event.preventDefault) {
             event.preventDefault();
         }
@@ -9149,6 +9222,7 @@ function gererTouchEndCanvas(event) {
 
 function gererTouchCancelCanvas() {
     annulerTimerAppuiLongTir();
+    arreterTirMaintenu();
     departTouchTir = null;
     appuiLongTirDeclenche = false;
 }
