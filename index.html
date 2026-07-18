@@ -418,6 +418,11 @@
                     clic gauche = déplacer Surcouf d’une case ;
                     clic droit = tirer sur une cible à une case.
                 </p>
+                
+                <p>
+                    <strong>Tirs :</strong>
+                    Un tir à 33% de chances de réussite
+                </p>
 
                 <p>
                     <strong>Ravitaillement :</strong>
@@ -727,6 +732,10 @@ let timerReponsePirateApresTirCorsaire = null;
 // Si un territoire corsaire vient de tirer sur Barbe-Noire,
 // Barbe-Noire ignore ce territoire pour sa prochaine décision seulement.
 let territoireCorsaireIgnoreDecisionPirate = null;
+
+// v253 — réaction après un tir raté d'un territoire corsaire sur Barbe-Noire.
+// Cette mémoire ne vaut que pour la réponse IA immédiatement suivante.
+let territoireCorsaireAttaquantDecisionPirate = null;
 
 // Batteries de territoires pirates : tir automatique si Surcouf est à 1 case.
 const DELAI_TIR_TERRITOIRE_PIRATE_MS = 500;
@@ -1640,6 +1649,23 @@ function reapparaitreBateauSurTerritoireOuPort(acteur) {
         col: bateau.col
     };
 
+    // Règle :
+    // - Barbe-Noire réapparaît sur son territoire le plus proche du port corsaire
+    //   lorsque Surcouf porte le trésor ;
+    // - dans tous les autres cas, le territoire le plus proche de l'île est retenu ;
+    // - à défaut de territoire possédé, le bateau réapparaît dans son port.
+    const pirateDoitCouperRetourTresor =
+        acteur === "pirate" &&
+        surcoufPorteTresor();
+
+    const referenceReapparition = pirateDoitCouperRetourTresor
+        ? geographie.ports.corsaire
+        : geographie.ile;
+
+    const nomReferenceReapparition = pirateDoitCouperRetourTresor
+        ? "port corsaire"
+        : "île";
+
     let destination = null;
 
     for (const nom of Object.keys(etatPartie.territoires)) {
@@ -1662,10 +1688,16 @@ function reapparaitreBateauSurTerritoireOuPort(acteur) {
                 lig: territoireGeo.lig,
                 col: territoireGeo.col
             },
-            distanceIle: distanceCases(territoireGeo, geographie.ile)
+            distanceReference: distanceCases(
+                territoireGeo,
+                referenceReapparition
+            )
         };
 
-        if (!destination || candidat.distanceIle < destination.distanceIle) {
+        if (
+            !destination ||
+            candidat.distanceReference < destination.distanceReference
+        ) {
             destination = candidat;
         }
     }
@@ -1675,7 +1707,7 @@ function reapparaitreBateauSurTerritoireOuPort(acteur) {
             type: "port",
             nom: "port_" + acteur,
             pos: positionPortActeur(acteur),
-            distanceIle: null
+            distanceReference: null
         };
     }
 
@@ -1703,7 +1735,8 @@ function reapparaitreBateauSurTerritoireOuPort(acteur) {
         },
         typeDestination: destination.type,
         nomDestination: destination.nom,
-        distanceIle: destination.distanceIle
+        distanceReference: destination.distanceReference,
+        referenceReapparition: nomReferenceReapparition
     };
 }
 
@@ -2016,6 +2049,14 @@ function appliquerActionDeplacement(action) {
         "Déplacements depuis sortie du spot verrouillé : " +
         bateau.deplacementsDepuisRegeneration
     );
+
+    if (action.evitementTerritoireCorsaireAttaquant) {
+        action.detailsEffets.push(
+            "Réaction v253 : Barbe-Noire sort de la portée de " +
+            action.territoireCorsaireAttaquant.nom +
+            " et termine à plus d'une case du territoire"
+        );
+    }
 
     if (action.antiPiegeProximiteSurcouf) {
         action.detailsEffets.push(
@@ -4374,10 +4415,10 @@ function planifierResolutionTirBateauApresImpact(action) {
 function appliquerResolutionPostImpactTir(action, options = {}) {
     appliquerReculCibleBateauRate(action);
 
-    // v249 — essai : anti-obstination territoriale neutralisée.
-    // Un territoire corsaire qui vient de tirer sur Barbe-Noire
-    // reste donc pris en compte dès la décision pirate suivante.
-    // memoriserTerritoireCorsaireQuiVientDeTirerPirate(action);
+    // v249 — l'ancienne règle d'ignorance reste neutralisée.
+    // v253 — en revanche, un territoire corsaire qui vient de manquer
+    // Barbe-Noire est mémorisé pour encadrer sa réponse immédiate.
+    memoriserTerritoireCorsaireAttaquantPirate(action);
 
     if (action.effets.includes("toucher_bateau_adverse")) {
         if (action.cibleBateau === "corsaire" && surcoufPorteTresor()) {
@@ -4899,6 +4940,58 @@ function memoriserTerritoireCorsaireQuiVientDeTirerPirate(action) {
         " vient de tirer sur Barbe-Noire ; ce territoire sera ignoré à la prochaine décision"
     );
 }
+
+function memoriserTerritoireCorsaireAttaquantPirate(action) {
+    if (
+        !action ||
+        !action.source ||
+        action.source.type !== "territoire" ||
+        action.source.acteur !== "corsaire" ||
+        action.cibleBateauRatee !== "pirate"
+    ) {
+        return;
+    }
+
+    territoireCorsaireAttaquantDecisionPirate = action.source.nom;
+
+    action.detailsEffets.push(
+        "Réaction v253 : " +
+        action.source.nom +
+        " vient de manquer Barbe-Noire ; tout déplacement pirate de la prochaine réponse devra finir à plus d'une case de ce territoire"
+    );
+}
+
+function territoireCorsaireAttaquantActifPourPirate() {
+    if (!territoireCorsaireAttaquantDecisionPirate) {
+        return null;
+    }
+
+    const nom = territoireCorsaireAttaquantDecisionPirate;
+    const territoireEtat = etatPartie.territoires[nom];
+    const territoireGeo = geographie.territoires[nom];
+
+    if (
+        !territoireEtat ||
+        territoireEtat.owner !== "corsaire" ||
+        !territoireGeo
+    ) {
+        territoireCorsaireAttaquantDecisionPirate = null;
+        return null;
+    }
+
+    return {
+        nom: nom,
+        pos: {
+            lig: territoireGeo.lig,
+            col: territoireGeo.col
+        }
+    };
+}
+
+function effacerTerritoireCorsaireAttaquantDecisionPirate() {
+    territoireCorsaireAttaquantDecisionPirate = null;
+}
+
 
 function territoireCorsaireIgnoreActifPourPirate() {
     if (!territoireCorsaireIgnoreDecisionPirate) {
@@ -6962,6 +7055,8 @@ function analyserEtatPourPirate() {
     const bateauPirate = etatPartie.bateaux.pirate;
 
     const territoireCorsaireIgnore = territoireCorsaireIgnoreActifPourPirate();
+    const territoireCorsaireAttaquant =
+        territoireCorsaireAttaquantActifPourPirate();
 
     const territoirePirateProche = trouverTerritoireSelonOwnerLePlusProche("pirate", posPirate);
     const territoireCorsaireProche = trouverTerritoireSelonOwnerLePlusProche(
@@ -7016,6 +7111,14 @@ function analyserEtatPourPirate() {
         territoireCorsaireProche: territoireCorsaireProche,
         territoireLibreProche: territoireLibreProche,
         territoireCorsaireIgnoreDecision: territoireCorsaireIgnore,
+        territoireCorsaireAttaquantDecision: territoireCorsaireAttaquant,
+        destinationHorsPorteeTerritoireAttaquantExiste: (
+            territoireCorsaireAttaquant
+                ? existeDestinationPirateHorsPorteeTerritoire(
+                    territoireCorsaireAttaquant.pos
+                )
+                : false
+        ),
 
         perimetrePirate: perimetrePirate,
         surcoufDansPerimetrePirate: perimetrePirate.surcoufDansPerimetre,
@@ -7208,6 +7311,37 @@ function distanceMaxDeplacementPirateIA() {
     return 1;
 }
 
+function existeDestinationPirateHorsPorteeTerritoire(territoirePos) {
+    if (!territoirePos) {
+        return false;
+    }
+
+    const acteur = "pirate";
+    const depart = positionBateau(acteur);
+    const distanceMax = distanceMaxDeplacementPirateIA();
+
+    return positionsVoisinesPourIA(depart, distanceMax)
+        .filter(positionDansGrille)
+        .some(function(pos) {
+            if (distanceCases(pos, territoirePos) <= PORTEE_TIR) {
+                return false;
+            }
+
+            const action = construireActionDeplacement(acteur, "ia", pos);
+            action.distanceMaxAutorisee = distanceMax;
+            validerActionDeplacement(action);
+
+            if (!action.autorisee) {
+                return false;
+            }
+
+            const bateauPresent = bateauSurCase(pos);
+
+            return !bateauPresent || bateauPresent === acteur;
+        });
+}
+
+
 function construireActionDeplacementPirateVers(objectif, libelle, options = {}) {
     const acteur = "pirate";
     const depart = positionBateau(acteur);
@@ -7255,6 +7389,20 @@ function construireActionDeplacementPirateVers(objectif, libelle, options = {}) 
     let antiPiegeProximiteDernierRecours = false;
     let deplacementDeuxCasesTresorApplique = false;
     let deplacementDeuxCasesTresorDernierRecours = false;
+    let evitementTerritoireCorsaireAttaquantApplique = false;
+
+    if (options.territoireCorsaireAttaquant) {
+        candidats = candidats.filter(function(candidat) {
+            return (
+                distanceCases(
+                    candidat.pos,
+                    options.territoireCorsaireAttaquant.pos
+                ) > PORTEE_TIR
+            );
+        });
+
+        evitementTerritoireCorsaireAttaquantApplique = candidats.length > 0;
+    }
 
     if (!options.autoriserProximiteSurcouf) {
         // Anti-proximité permanent.
@@ -7328,6 +7476,19 @@ function construireActionDeplacementPirateVers(objectif, libelle, options = {}) 
     action.deplacementDeuxCasesTresor = deplacementDeuxCasesTresorApplique;
     action.deplacementDeuxCasesTresorDernierRecours = deplacementDeuxCasesTresorDernierRecours;
     action.proximiteSurcoufAutorisee = !!options.autoriserProximiteSurcouf;
+    action.evitementTerritoireCorsaireAttaquant =
+        evitementTerritoireCorsaireAttaquantApplique;
+
+    if (options.territoireCorsaireAttaquant) {
+        action.territoireCorsaireAttaquant = {
+            nom: options.territoireCorsaireAttaquant.nom,
+            pos: {
+                lig: options.territoireCorsaireAttaquant.pos.lig,
+                col: options.territoireCorsaireAttaquant.pos.col
+            }
+        };
+    }
+
     action.objectifIA = {
         lig: objectif.lig,
         col: objectif.col
@@ -7868,6 +8029,11 @@ function convertirIntentionPirateEnAction(intention, analyse) {
                 autoriserProximiteSurcouf: (
                     intention.intention === "provoquer_soucouf_tresor_hors_cordon" ||
                     intention.intention === "entrer_ile_defense"
+                ),
+                territoireCorsaireAttaquant: (
+                    analyse.piratePeutTirerBateau
+                        ? analyse.territoireCorsaireAttaquantDecision
+                        : null
                 )
             }
         );
@@ -7876,7 +8042,54 @@ function convertirIntentionPirateEnAction(intention, analyse) {
     return null;
 }
 
+function construireRiposteTerritoireCorsaireAttaquant(analyse) {
+    const attaquant = analyse.territoireCorsaireAttaquantDecision;
+
+    if (!attaquant || !analyse.piratePeutTirerBateau) {
+        return null;
+    }
+
+    const action = construireActionTirBateauIA(
+        "pirate",
+        attaquant.pos,
+        "P0_V253_RIPOSTE_TERRITOIRE_CORSAIRE_ATTAQUANT"
+    );
+
+    if (!action) {
+        return null;
+    }
+
+    action.choixIA = "P0_V253_RIPOSTE_TERRITOIRE_CORSAIRE_ATTAQUANT";
+    action.intentionPirate = creerIntentionPirate(
+        "P0_V253",
+        "riposter_territoire_corsaire_attaquant",
+        attaquant.pos,
+        "Aucune destination accessible ne permet de sortir de la portée du territoire corsaire attaquant ; Barbe-Noire riposte"
+    );
+
+    return action;
+}
+
+
 function choisirActionPirateDepuisBlocDecisionnel(analyse) {
+    if (
+        analyse.territoireCorsaireAttaquantDecision &&
+        analyse.piratePeutTirerBateau &&
+        !analyse.destinationHorsPorteeTerritoireAttaquantExiste
+    ) {
+        const ripostePrioritaire =
+            construireRiposteTerritoireCorsaireAttaquant(analyse);
+
+        if (ripostePrioritaire) {
+            analyse.intentionsPirate = [ripostePrioritaire.intentionPirate];
+            analyse.intentionsPirateEcartees = [];
+            analyse.intentionPirateRetenue =
+                ripostePrioritaire.intentionPirate;
+
+            return ripostePrioritaire;
+        }
+    }
+
     const intentions = listerIntentionsPirate(analyse);
     const intentionsEcartees = [];
 
@@ -7901,6 +8114,16 @@ function choisirActionPirateDepuisBlocDecisionnel(analyse) {
             intention: intention.intention,
             raison: "intention impossible mécaniquement"
         });
+    }
+
+    const riposteDernierRecours =
+        construireRiposteTerritoireCorsaireAttaquant(analyse);
+
+    if (riposteDernierRecours) {
+        analyse.intentionPirateRetenue =
+            riposteDernierRecours.intentionPirate;
+
+        return riposteDernierRecours;
     }
 
     return null;
@@ -8274,6 +8497,7 @@ function activationPirateIA() {
 
     if (!action) {
         effacerTerritoireCorsaireIgnoreDecisionPirate();
+        effacerTerritoireCorsaireAttaquantDecisionPirate();
 
         dernierMessageIAPirate = decrireAnalysePirate(analyse, null);
         iaPirateEnCours = false;
@@ -8292,8 +8516,9 @@ function activationPirateIA() {
         executerActionFinPartieStrategique(action);
     }
 
-    // La mémoire territoriale éventuelle ne vaut que pour la prochaine réponse IA.
+    // Les mémoires territoriales éventuelles ne valent que pour la prochaine réponse IA.
     effacerTerritoireCorsaireIgnoreDecisionPirate();
+    effacerTerritoireCorsaireAttaquantDecisionPirate();
 
     if (partieTerminee()) {
         iaPirateEnCours = false;
@@ -8372,6 +8597,13 @@ function afficherDebugEtatPartie() {
         lignes.push(
             "Territoire corsaire à ignorer à la prochaine décision Pirate : " +
             territoireCorsaireIgnoreDecisionPirate
+        );
+    }
+
+    if (territoireCorsaireAttaquantDecisionPirate) {
+        lignes.push(
+            "Territoire corsaire attaquant mémorisé pour la réponse Pirate : " +
+            territoireCorsaireAttaquantDecisionPirate
         );
     }
 
@@ -8632,6 +8864,7 @@ function appliquerParametres() {
     // Les paramètres modifient les compteurs de départ :
     // on remet donc l'état à zéro, mais on garde le même archipel.
     etatPartie = creerEtatInitialPartie();
+    effacerTerritoireCorsaireAttaquantDecisionPirate();
     acteurActif = "corsaire";
     acteurSelectionne = null;
     sourceTirSelectionnee = null;
@@ -8744,6 +8977,7 @@ function nouvellePartieMemeArchipel() {
 
     // Même archipel, mais état de partie remis à zéro.
     etatPartie = creerEtatInitialPartie();
+    effacerTerritoireCorsaireAttaquantDecisionPirate();
     recalculerCordonDefensifPirate("nouvelle partie même archipel");
     recalculerPorteCordonProcheSurcouf("nouvelle partie même archipel");
     acteurActif = "corsaire";
@@ -8774,6 +9008,7 @@ function nouvelleGrilleNouvelArchipel() {
 
     geographie = creerNouvelleGeographie();
     etatPartie = creerEtatInitialPartie();
+    effacerTerritoireCorsaireAttaquantDecisionPirate();
     recalculerCordonDefensifPirate("nouvelle grille / nouvel archipel");
     recalculerPorteCordonProcheSurcouf("nouvelle grille / nouvel archipel");
     acteurActif = "corsaire";
