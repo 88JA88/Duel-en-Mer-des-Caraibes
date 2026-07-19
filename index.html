@@ -88,9 +88,41 @@
         font-size: 18px;
     }
 
+    .zone-distance {
+        display: grid;
+        grid-template-columns: minmax(150px, 1fr) minmax(120px, 180px) minmax(150px, 1fr);
+        gap: 10px;
+        align-items: stretch;
+        margin-top: 12px;
+        padding-top: 12px;
+        border-top: 1px solid #c8d5e0;
+    }
+
+    .zone-distance input {
+        box-sizing: border-box;
+        width: 100%;
+        min-height: 42px;
+        padding: 8px 10px;
+        border: 1px solid #777;
+        border-radius: 6px;
+        background: #fff;
+        font-size: 18px;
+        text-align: center;
+        text-transform: uppercase;
+    }
+
+    .etat-distance {
+        grid-column: 1 / -1;
+        min-height: 20px;
+        margin: 0;
+        font-size: 14px;
+        font-weight: bold;
+        text-align: center;
+    }
+
     .boutons-jeu {
         display: grid;
-        grid-template-columns: repeat(4, minmax(150px, 1fr));
+        grid-template-columns: repeat(6, minmax(130px, 1fr));
         gap: 10px;
         align-items: stretch;
     }
@@ -487,6 +519,36 @@
             <button id="btnNouvelleGrille">Nouvelle grille<br><small>nouvel archipel</small></button>
             <button id="btnParametres">Paramètres<br><small>quotas, tirs, bateaux</small></button>
             <button id="btnReglesJeu">Règles du jeu<br><small>objectif, clics, territoires</small></button>
+            <button id="btnModeIAPirate" type="button" aria-pressed="false">
+                IA Pirate : SANS<br><small>Barbe-Noire et batteries muets</small>
+            </button>
+            <button id="btnPiloteLocal" type="button">
+                Je suis Surcouf<br><small>clic pour changer de rôle</small>
+            </button>
+        </div>
+
+        <div class="zone-distance" aria-label="Partie à distance">
+            <button id="btnCreerPartieDistance" type="button">
+                Créer une partie<br><small>je serai Surcouf</small>
+            </button>
+
+            <input
+                id="codePartieDistance"
+                type="text"
+                inputmode="numeric"
+                maxlength="4"
+                autocomplete="off"
+                placeholder="CODE"
+                aria-label="Code de la partie"
+            >
+
+            <button id="btnRejoindrePartieDistance" type="button">
+                Rejoindre<br><small>je serai Barbe-Noire</small>
+            </button>
+
+            <p id="etatConnexionDistance" class="etat-distance">
+                Mode local
+            </p>
         </div>
 
         <label class="curseur-case" for="tailleCase">
@@ -703,16 +765,50 @@ let etatPartie = null;
 let acteurActif = "corsaire";
 let pilotage = {
     corsaire: "humain",
-    pirate: "ia"
+    pirate: "humain"
 };
 
 let acteurSelectionne = null;
 let derniereAction = null;
 let sourceTirSelectionnee = null;
 
+// v260 — couche commune destinée au futur échange Firebase.
+// Les clics humains produisent uniquement deux commandes sérialisables :
+// "avancer" ou "tirer". Firebase n'est pas encore branché.
+let compteurCommandesJeu = 0;
+let derniereCommandeJeu = null;
+
+// v263 — sortie propre d'une partie Firebase.
+// En mode distant, le bouton "Nouvelle partie" devient "Quitter la partie".
+// Le départ de l'un des joueurs est signalé à l'autre appareil, puis chacun
+// revient au mode local. La synchronisation des commandes reste celle de v262.
+const CHEMIN_FIREBASE_CARAIBES = "caraibes";
+const idAppareilDistance = (
+    typeof crypto !== "undefined" && crypto.randomUUID
+        ? crypto.randomUUID()
+        : "appareil_" + Date.now() + "_" + Math.random().toString(36).slice(2)
+);
+
+let firebaseCharge = null;
+let firebaseDb = null;
+let firebaseOutils = null;
+let modeDistance = false;
+let codePartieDistance = null;
+let monRoleDistance = null;
+let arreterEcoutePartieDistance = null;
+let arreterEcouteCommandesDistance = null;
+let envoiCommandeDistanceEnCours = false;
+let sortieDistanceEnCours = false;
+const commandesJeuTraiteesDistance = new Set();
+
+// v255 — interrupteur général des automatismes pirates.
+// false : Barbe-Noire et les batteries de ses territoires restent totalement muets.
+// true  : fonctionnement IA actuel strictement conservé.
+let MODE_IA_PIRATE = false;
+
 // IA Pirate : elle ne joue plus selon un timer permanent.
 // Dans cette couche, elle analyse uniquement après un déplacement réussi de Surcouf.
-let iaPirateActive = true;
+let iaPirateActive = MODE_IA_PIRATE;
 let iaPirateEnCours = false;
 let derniereAnalysePirate = null;
 let dernierMessageIAPirate = "";
@@ -741,7 +837,7 @@ let territoireCorsaireAttaquantDecisionPirate = null;
 // Batteries de territoires pirates : tir automatique si Surcouf est à 1 case.
 const DELAI_TIR_TERRITOIRE_PIRATE_MS = 500;
 let timerTirsTerritoiresPirates = null;
-let tirsTerritoiresPiratesActifs = true;
+let tirsTerritoiresPiratesActifs = MODE_IA_PIRATE;
 let tirTerritoirePirateEnCours = false;
 let dernierTirTerritoirePirate = null;
 let debutAlerteTerritoiresPirates = {};
@@ -849,28 +945,121 @@ function estPortAdverse(caseInfo, acteur) {
 }
 
 function changerActeurActif() {
-    acteurActif = "corsaire";
+    if (MODE_IA_PIRATE) {
+        acteurActif = "corsaire";
+
+        afficherMessageAction(
+            "Mode avec IA : vous pilotez Surcouf. Barbe-Noire reste piloté automatiquement."
+        );
+    } else {
+        acteurActif = acteurActif === "corsaire"
+            ? "pirate"
+            : "corsaire";
+
+        afficherMessageAction(
+            "Pilotage local : " +
+            nomAfficheActeur(acteurActif) +
+            ". Barbe-Noire peut avancer et tirer manuellement."
+        );
+    }
+
     acteurSelectionne = null;
     sourceTirSelectionnee = null;
 
     mettreAJourBoutonActeurActif();
+    mettreAJourBoutonModeIAPirate();
     appliquerTailleCasesDepuisCurseur(CELL_SIZE);
     dessinerGeographie();
-
-    afficherMessageAction(
-        "Mode IA : vous pilotez Surcouf. Barbe-Noire est piloté automatiquement."
-    );
 }
 
-function mettreAJourBoutonActeurActif() {
-    const bouton = document.getElementById("btnActeurActif");
+function mettreAJourBoutonModeIAPirate() {
+    const bouton = document.getElementById("btnModeIAPirate");
 
     if (!bouton) {
         return;
     }
 
-    bouton.innerHTML =
-        "Mode : Surcouf humain<br><small>Barbe-Noire IA — après déplacement</small>";
+    bouton.setAttribute(
+        "aria-pressed",
+        MODE_IA_PIRATE ? "true" : "false"
+    );
+
+    bouton.disabled = modeDistance;
+
+    bouton.innerHTML = MODE_IA_PIRATE
+        ? "IA Pirate : AVEC<br><small>Barbe-Noire et batteries actifs</small>"
+        : "IA Pirate : SANS<br><small>Barbe-Noire et batteries muets</small>";
+}
+
+function basculerModeIAPirate() {
+    MODE_IA_PIRATE = !MODE_IA_PIRATE;
+
+    if (MODE_IA_PIRATE) {
+        acteurActif = "corsaire";
+        pilotage.corsaire = "humain";
+        pilotage.pirate = "ia";
+        acteurSelectionne = null;
+        sourceTirSelectionnee = null;
+
+        demarrerPirateIA();
+        demarrerTirsTerritoiresPirates();
+
+        afficherMessageAction(
+            "IA Pirate activée : vous pilotez Surcouf ; Barbe-Noire et les batteries de ses territoires reprennent leur fonctionnement automatique."
+        );
+    } else {
+        acteurActif = "corsaire";
+        pilotage.corsaire = "humain";
+        pilotage.pirate = "humain";
+        acteurSelectionne = null;
+        sourceTirSelectionnee = null;
+
+        arreterPirateIA();
+        arreterTirsTerritoiresPirates();
+
+        // Les mémoires d'une réponse pirate éventuellement préparée
+        // ne doivent pas être réutilisées lors d'une future réactivation.
+        effacerTerritoireCorsaireIgnoreDecisionPirate();
+        effacerTerritoireCorsaireAttaquantDecisionPirate();
+
+        afficherMessageAction(
+            "IA Pirate désactivée : les deux bateaux sont pilotables localement ; Barbe-Noire et ses batteries automatiques restent muets."
+        );
+    }
+
+    mettreAJourBoutonModeIAPirate();
+    mettreAJourBoutonActeurActif();
+    mettreAJourBoutonModeIAPirate();
+    dessinerGeographie();
+}
+
+
+function mettreAJourBoutonActeurActif() {
+    const boutonDev = document.getElementById("btnActeurActif");
+    const boutonVisible = document.getElementById("btnPiloteLocal");
+
+    const nomPilote = nomAfficheActeur(acteurActif);
+
+    if (boutonDev) {
+        boutonDev.innerHTML = MODE_IA_PIRATE
+            ? "Mode : Surcouf humain<br><small>Barbe-Noire IA — après déplacement</small>"
+            : "Je suis " + nomPilote +
+              "<br><small>clic pour changer de rôle</small>";
+    }
+
+    if (boutonVisible) {
+        boutonVisible.disabled = MODE_IA_PIRATE || modeDistance;
+
+        boutonVisible.innerHTML = modeDistance
+            ? "Je suis " + nomPilote +
+              "<br><small>rôle fixé pour cette partie</small>"
+            : (
+                MODE_IA_PIRATE
+                    ? "Je suis Surcouf<br><small>désactiver l’IA pour changer</small>"
+                    : "Je suis " + nomPilote +
+                      "<br><small>clic pour changer de rôle</small>"
+            );
+    }
 }
 
 
@@ -1887,6 +2076,773 @@ function pixelVersCase(x, y) {
     return { lig, col };
 }
 
+async function initialiserFirebaseSiNecessaire() {
+    if (firebaseCharge) {
+        return firebaseCharge;
+    }
+
+    firebaseCharge = (async function() {
+        const moduleApp = await import(
+            "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js"
+        );
+
+        const moduleDatabase = await import(
+            "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js"
+        );
+
+        const firebaseConfig = {
+            apiKey: "AIzaSyCNOujBHAg7jGD0Dbhbj3DerKBFjxZhIek",
+            authDomain: "numbers-49091.firebaseapp.com",
+            databaseURL: "https://numbers-49091-default-rtdb.europe-west1.firebasedatabase.app",
+            projectId: "numbers-49091",
+            storageBucket: "numbers-49091.firebasestorage.app",
+            messagingSenderId: "762941555289",
+            appId: "1:762941555289:web:c6c4b563dc437cb4a26748"
+        };
+
+        const app = moduleApp.initializeApp(firebaseConfig);
+        firebaseDb = moduleDatabase.getDatabase(app);
+
+        firebaseOutils = {
+            ref: moduleDatabase.ref,
+            set: moduleDatabase.set,
+            get: moduleDatabase.get,
+            update: moduleDatabase.update,
+            onValue: moduleDatabase.onValue,
+            onChildAdded: moduleDatabase.onChildAdded,
+            runTransaction: moduleDatabase.runTransaction
+        };
+
+        return true;
+    })();
+
+    try {
+        await firebaseCharge;
+        return true;
+    } catch (erreur) {
+        firebaseCharge = null;
+        firebaseDb = null;
+        firebaseOutils = null;
+        throw erreur;
+    }
+}
+
+function afficherEtatConnexionDistance(message) {
+    const zone = document.getElementById("etatConnexionDistance");
+
+    if (zone) {
+        zone.textContent = message;
+    }
+}
+
+function normaliserCodePartieDistance(valeur) {
+    return String(valeur || "")
+        .replace(/[^0-9]/g, "")
+        .slice(0, 4);
+}
+
+function exporterParametresPartie() {
+    return {
+        tirsNecessairesLibererTerritoire:
+            TIRS_NECESSAIRES_LIBERER_TERRITOIRE,
+        nbTresorsALivrer: NB_TRESORS_A_LIVRER,
+        bateaux: cloneSimple(PARAMS_BATEAUX)
+    };
+}
+
+function importerParametresPartie(parametres) {
+    if (!parametres || !parametres.bateaux) {
+        return;
+    }
+
+    TIRS_NECESSAIRES_LIBERER_TERRITOIRE =
+        Number(parametres.tirsNecessairesLibererTerritoire) ||
+        TIRS_NECESSAIRES_LIBERER_TERRITOIRE;
+
+    NB_TRESORS_A_LIVRER =
+        Number(parametres.nbTresorsALivrer) ||
+        NB_TRESORS_A_LIVRER;
+
+    ["corsaire", "pirate"].forEach(function(acteur) {
+        const source = parametres.bateaux[acteur];
+
+        if (!source) {
+            return;
+        }
+
+        Object.keys(PARAMS_BATEAUX[acteur]).forEach(function(cle) {
+            if (Number.isFinite(Number(source[cle]))) {
+                PARAMS_BATEAUX[acteur][cle] = Number(source[cle]);
+            }
+        });
+    });
+}
+
+function mettreAJourInterfaceDistance() {
+    const verrouille = modeDistance;
+    const boutonCreer = document.getElementById("btnCreerPartieDistance");
+    const boutonRejoindre = document.getElementById("btnRejoindrePartieDistance");
+    const champCode = document.getElementById("codePartieDistance");
+    const boutonNouvellePartie = document.getElementById("btnNouvellePartie");
+
+    if (boutonCreer) {
+        boutonCreer.disabled = verrouille;
+    }
+
+    if (boutonRejoindre) {
+        boutonRejoindre.disabled = verrouille;
+    }
+
+    if (champCode) {
+        champCode.disabled = verrouille;
+
+        if (codePartieDistance) {
+            champCode.value = codePartieDistance;
+        } else if (!modeDistance) {
+            champCode.value = "";
+        }
+    }
+
+    if (boutonNouvellePartie) {
+        boutonNouvellePartie.disabled = sortieDistanceEnCours;
+        boutonNouvellePartie.innerHTML = modeDistance
+            ? "Quitter la partie<br><small>retour au mode local</small>"
+            : "Nouvelle partie<br><small>même archipel</small>";
+    }
+
+    [
+        "btnNouvelleGrille",
+        "btnParametres",
+        "btnModeIAPirate",
+        "btnPiloteLocal",
+        "btnActeurActif"
+    ].forEach(function(id) {
+        const element = document.getElementById(id);
+
+        if (element) {
+            element.disabled = verrouille;
+        }
+    });
+}
+
+function quitterModeDistanceLocalement(message) {
+    if (arreterEcoutePartieDistance) {
+        arreterEcoutePartieDistance();
+        arreterEcoutePartieDistance = null;
+    }
+
+    if (arreterEcouteCommandesDistance) {
+        arreterEcouteCommandesDistance();
+        arreterEcouteCommandesDistance = null;
+    }
+
+    modeDistance = false;
+    codePartieDistance = null;
+    monRoleDistance = null;
+    sortieDistanceEnCours = false;
+    envoiCommandeDistanceEnCours = false;
+    commandesJeuTraiteesDistance.clear();
+
+    MODE_IA_PIRATE = false;
+    arreterPirateIA();
+    arreterTirsTerritoiresPirates();
+
+    pilotage.corsaire = "humain";
+    pilotage.pirate = "humain";
+    acteurActif = "corsaire";
+    acteurSelectionne = null;
+    sourceTirSelectionnee = null;
+
+    mettreAJourBoutonModeIAPirate();
+    mettreAJourBoutonActeurActif();
+    mettreAJourInterfaceDistance();
+    dessinerGeographie();
+
+    afficherEtatConnexionDistance(message || "Mode local");
+    afficherMessageAction(message || "Retour au mode local.");
+}
+
+async function quitterPartieDistance() {
+    if (!modeDistance || !codePartieDistance || !monRoleDistance) {
+        nouvellePartieMemeArchipel();
+        return;
+    }
+
+    if (sortieDistanceEnCours) {
+        return;
+    }
+
+    sortieDistanceEnCours = true;
+    mettreAJourInterfaceDistance();
+
+    try {
+        const roleQuiQuitte = monRoleDistance;
+        const reference = firebaseOutils.ref(
+            firebaseDb,
+            CHEMIN_FIREBASE_CARAIBES + "/" + codePartieDistance
+        );
+
+        await firebaseOutils.update(reference, {
+            statut: "partie_quittee",
+            quittePar: {
+                role: roleQuiQuitte,
+                nom: nomAfficheActeur(roleQuiQuitte),
+                idAppareil: idAppareilDistance,
+                quitteLe: Date.now()
+            }
+        });
+
+        // Le listener commun reçoit normalement cette modification et effectue
+        // la sortie locale. Ce secours évite de rester bloqué si l'écho tarde.
+        setTimeout(function() {
+            if (modeDistance && sortieDistanceEnCours) {
+                quitterModeDistanceLocalement(
+                    "Vous avez quitté la partie — mode local"
+                );
+            }
+        }, 700);
+    } catch (erreur) {
+        sortieDistanceEnCours = false;
+        mettreAJourInterfaceDistance();
+        afficherEtatConnexionDistance(
+            "Impossible de quitter : " + erreur.message
+        );
+    }
+}
+
+function appliquerRoleDistanceLocal(role) {
+    modeDistance = true;
+    monRoleDistance = role;
+
+    MODE_IA_PIRATE = false;
+    arreterPirateIA();
+    arreterTirsTerritoiresPirates();
+
+    pilotage.corsaire = role === "corsaire" ? "humain" : "distance";
+    pilotage.pirate = role === "pirate" ? "humain" : "distance";
+
+    acteurActif = role;
+    acteurSelectionne = null;
+    sourceTirSelectionnee = null;
+
+    mettreAJourBoutonModeIAPirate();
+    mettreAJourBoutonActeurActif();
+    mettreAJourInterfaceDistance();
+    dessinerGeographie();
+}
+
+function creerCodePartieDistance() {
+    return String(Math.floor(1000 + Math.random() * 9000));
+}
+
+async function trouverCodePartieDistanceLibre() {
+    for (let tentative = 0; tentative < 20; tentative += 1) {
+        const code = creerCodePartieDistance();
+        const reference = firebaseOutils.ref(
+            firebaseDb,
+            CHEMIN_FIREBASE_CARAIBES + "/" + code
+        );
+        const snapshot = await firebaseOutils.get(reference);
+
+        if (!snapshot.exists()) {
+            return code;
+        }
+    }
+
+    throw new Error("Impossible de trouver un code libre.");
+}
+
+function ecouterEtatPartieDistance() {
+    if (!codePartieDistance || !firebaseOutils || !firebaseDb) {
+        return;
+    }
+
+    if (arreterEcoutePartieDistance) {
+        arreterEcoutePartieDistance();
+        arreterEcoutePartieDistance = null;
+    }
+
+    const reference = firebaseOutils.ref(
+        firebaseDb,
+        CHEMIN_FIREBASE_CARAIBES + "/" + codePartieDistance
+    );
+
+    arreterEcoutePartieDistance = firebaseOutils.onValue(
+        reference,
+        function(snapshot) {
+            if (!snapshot.exists()) {
+                afficherEtatConnexionDistance("Partie supprimée ou introuvable");
+                return;
+            }
+
+            const data = snapshot.val();
+
+            if (data.statut === "partie_quittee") {
+                const quittePar = data.quittePar || {};
+                const estMonDepart =
+                    quittePar.idAppareil === idAppareilDistance;
+                const nomDepart = quittePar.nom ||
+                    nomAfficheActeur(quittePar.role || "joueur");
+
+                quitterModeDistanceLocalement(
+                    estMonDepart
+                        ? "Vous avez quitté la partie — mode local"
+                        : nomDepart + " a quitté la partie — mode local"
+                );
+                return;
+            }
+
+            const pirateConnecte =
+                data.joueurs &&
+                data.joueurs.pirate &&
+                data.joueurs.pirate.idAppareil;
+
+            const roleTexte = monRoleDistance === "corsaire"
+                ? "Surcouf"
+                : "Barbe-Noire";
+
+            afficherEtatConnexionDistance(
+                "Partie " +
+                codePartieDistance +
+                " — je suis " +
+                roleTexte +
+                (pirateConnecte
+                    ? " — deux joueurs connectés"
+                    : " — attente de Barbe-Noire")
+            );
+        },
+        function(erreur) {
+            afficherEtatConnexionDistance(
+                "Erreur Firebase : " + erreur.message
+            );
+        }
+    );
+}
+
+
+function ecouterCommandesJeuDistance() {
+    if (!codePartieDistance || !firebaseOutils || !firebaseDb) {
+        return;
+    }
+
+    if (arreterEcouteCommandesDistance) {
+        arreterEcouteCommandesDistance();
+        arreterEcouteCommandesDistance = null;
+    }
+
+    const referenceCommandes = firebaseOutils.ref(
+        firebaseDb,
+        CHEMIN_FIREBASE_CARAIBES +
+            "/" +
+            codePartieDistance +
+            "/commandes"
+    );
+
+    arreterEcouteCommandesDistance = firebaseOutils.onChildAdded(
+        referenceCommandes,
+        function(snapshot) {
+            const commande = snapshot.val();
+
+            if (!commandeJeuValide(commande) || !commande.id) {
+                return;
+            }
+
+            if (commandesJeuTraiteesDistance.has(commande.id)) {
+                return;
+            }
+
+            // L'identifiant est mémorisé avant l'exécution : même si Firebase
+            // réémet le même enfant, cette commande ne pourra pas être rejouée.
+            commandesJeuTraiteesDistance.add(commande.id);
+
+            // Chaque appareil exécute sa propre commande localement après
+            // confirmation de l'écriture Firebase. L'écho Firebase est ignoré.
+            if (commande.acteur === monRoleDistance) {
+                return;
+            }
+
+            if (commande.acteur !== adversaireDe(monRoleDistance)) {
+                return;
+            }
+
+            executerCommandeJeu(
+                cloneSimple(commande),
+                "firebase_autre_appareil"
+            );
+        },
+        function(erreur) {
+            afficherEtatConnexionDistance(
+                "Erreur commandes Firebase : " + erreur.message
+            );
+        }
+    );
+}
+
+async function transmettreCommandeJeuDistance(commande) {
+    if (
+        !modeDistance ||
+        !codePartieDistance ||
+        !firebaseOutils ||
+        !firebaseDb
+    ) {
+        throw new Error("Partie Firebase non prête.");
+    }
+
+    if (commande.acteur !== monRoleDistance) {
+        throw new Error("Cette commande n'appartient pas à votre rôle.");
+    }
+
+    const referenceCommande = firebaseOutils.ref(
+        firebaseDb,
+        CHEMIN_FIREBASE_CARAIBES +
+            "/" +
+            codePartieDistance +
+            "/commandes/" +
+            commande.id
+    );
+
+    await firebaseOutils.set(referenceCommande, cloneSimple(commande));
+}
+
+function executerCommandeLocaleEtDistance(commande) {
+    if (!modeDistance) {
+        return executerCommandeJeu(commande, "clic_local");
+    }
+
+    if (sortieDistanceEnCours) {
+        afficherMessageAction("Sortie de la partie en cours.");
+        return false;
+    }
+
+    if (envoiCommandeDistanceEnCours) {
+        afficherMessageAction(
+            "Transmission de la commande précédente en cours."
+        );
+        return false;
+    }
+
+    envoiCommandeDistanceEnCours = true;
+
+    transmettreCommandeJeuDistance(commande)
+        .then(function() {
+            // Le listener Firebase peut déjà avoir vu notre propre commande.
+            // Elle est mémorisée pour garantir qu'elle ne sera jamais rejouée.
+            commandesJeuTraiteesDistance.add(commande.id);
+
+            executerCommandeJeu(
+                commande,
+                "clic_local_apres_envoi_firebase"
+            );
+        })
+        .catch(function(erreur) {
+            afficherMessageAction(
+                "Commande non transmise : " + erreur.message
+            );
+        })
+        .finally(function() {
+            envoiCommandeDistanceEnCours = false;
+        });
+
+    return true;
+}
+
+async function creerPartieDistance() {
+    try {
+        afficherEtatConnexionDistance("Connexion à Firebase…");
+        await initialiserFirebaseSiNecessaire();
+
+        const code = await trouverCodePartieDistanceLibre();
+        const reference = firebaseOutils.ref(
+            firebaseDb,
+            CHEMIN_FIREBASE_CARAIBES + "/" + code
+        );
+
+        const donneesInitiales = {
+            version: 1,
+            creeeLe: Date.now(),
+            statut: "attente_pirate",
+            geographie: cloneSimple(geographie),
+            etatInitial: cloneSimple(etatPartie),
+            parametres: exporterParametresPartie(),
+            joueurs: {
+                corsaire: {
+                    idAppareil: idAppareilDistance,
+                    connecteLe: Date.now()
+                },
+                pirate: null
+            }
+        };
+
+        await firebaseOutils.set(reference, donneesInitiales);
+
+        codePartieDistance = code;
+        document.getElementById("codePartieDistance").value = code;
+        appliquerRoleDistanceLocal("corsaire");
+        ecouterEtatPartieDistance();
+        ecouterCommandesJeuDistance();
+
+        afficherMessageAction(
+            "Partie Firebase créée : code " +
+            code +
+            ". Vous êtes Surcouf. Les commandes avancer et tirer sont maintenant synchronisées."
+        );
+    } catch (erreur) {
+        afficherEtatConnexionDistance(
+            "Erreur Firebase : " + erreur.message
+        );
+    }
+}
+
+async function rejoindrePartieDistance() {
+    const champ = document.getElementById("codePartieDistance");
+    const code = normaliserCodePartieDistance(champ ? champ.value : "");
+
+    if (code.length !== 4) {
+        afficherEtatConnexionDistance("Saisissez un code à 4 chiffres");
+        return;
+    }
+
+    try {
+        afficherEtatConnexionDistance("Recherche de la partie…");
+        await initialiserFirebaseSiNecessaire();
+
+        const reference = firebaseOutils.ref(
+            firebaseDb,
+            CHEMIN_FIREBASE_CARAIBES + "/" + code
+        );
+
+        const snapshot = await firebaseOutils.get(reference);
+
+        if (!snapshot.exists()) {
+            afficherEtatConnexionDistance("Partie introuvable");
+            return;
+        }
+
+        const data = snapshot.val();
+
+        if (data.statut === "partie_quittee") {
+            afficherEtatConnexionDistance(
+                "Cette partie a été quittée ; demandez un nouveau code"
+            );
+            return;
+        }
+
+        const referenceJoueurPirate = firebaseOutils.ref(
+            firebaseDb,
+            CHEMIN_FIREBASE_CARAIBES +
+                "/" +
+                code +
+                "/joueurs/pirate"
+        );
+
+        const resultatReservation = await firebaseOutils.runTransaction(
+            referenceJoueurPirate,
+            function(valeurActuelle) {
+                if (
+                    valeurActuelle &&
+                    valeurActuelle.idAppareil &&
+                    valeurActuelle.idAppareil !== idAppareilDistance
+                ) {
+                    return;
+                }
+
+                return {
+                    idAppareil: idAppareilDistance,
+                    connecteLe: Date.now()
+                };
+            },
+            {
+                applyLocally: false
+            }
+        );
+
+        if (!resultatReservation.committed) {
+            afficherEtatConnexionDistance(
+                "La place de Barbe-Noire est déjà occupée"
+            );
+            return;
+        }
+
+        importerParametresPartie(data.parametres);
+        geographie = cloneSimple(data.geographie);
+        etatPartie = cloneSimple(data.etatInitial);
+
+        recalculerCordonDefensifPirate(
+            "chargement de la partie Firebase"
+        );
+        recalculerPorteCordonProcheSurcouf(
+            "chargement de la partie Firebase"
+        );
+
+        await firebaseOutils.update(reference, {
+            statut: "deux_joueurs",
+            joueurPirateConnecteLe: Date.now()
+        });
+
+        codePartieDistance = code;
+        appliquerRoleDistanceLocal("pirate");
+        ecouterEtatPartieDistance();
+        ecouterCommandesJeuDistance();
+
+        afficherMessageAction(
+            "Partie Firebase rejointe : code " +
+            code +
+            ". Vous êtes Barbe-Noire. L'archipel et l'état initial ont été chargés."
+        );
+    } catch (erreur) {
+        afficherEtatConnexionDistance(
+            "Erreur Firebase : " + erreur.message
+        );
+    }
+}
+
+
+function creerIdentifiantCommandeJeu(acteur) {
+    compteurCommandesJeu += 1;
+
+    return (
+        "cmd_" +
+        acteur +
+        "_" +
+        Date.now() +
+        "_" +
+        compteurCommandesJeu
+    );
+}
+
+function creerCommandeAvancer(acteur, destination) {
+    return {
+        version: 1,
+        id: creerIdentifiantCommandeJeu(acteur),
+        type: "avancer",
+        acteur: acteur,
+        destination: {
+            lig: destination.lig,
+            col: destination.col
+        },
+        creeA: Date.now()
+    };
+}
+
+function creerCommandeTirerDepuisAction(actionTir) {
+    const tirDirectSurBateau =
+        actionTir &&
+        actionTir.effets &&
+        actionTir.effets.includes("toucher_bateau_adverse");
+
+    return {
+        version: 1,
+        id: creerIdentifiantCommandeJeu(actionTir.acteur),
+        type: "tirer",
+        acteur: actionTir.acteur,
+        source: {
+            type: actionTir.source.type,
+            nom: actionTir.source.nom,
+            pos: {
+                lig: actionTir.source.pos.lig,
+                col: actionTir.source.pos.col
+            }
+        },
+        cible: {
+            lig: actionTir.cible.pos.lig,
+            col: actionTir.cible.pos.col
+        },
+
+        // Le même jet devra être utilisé sur les deux appareils.
+        // Il est sans effet lorsque la cible n'est pas un bateau.
+        aleaTir: tirDirectSurBateau ? Math.random() : null,
+        creeA: Date.now()
+    };
+}
+
+function retrouverSourceTirDepuisCommande(commande) {
+    if (!commande || !commande.source) {
+        return null;
+    }
+
+    const sources = listerDroitsDeTir(commande.acteur);
+
+    return sources.find(function(source) {
+        return (
+            source.type === commande.source.type &&
+            source.nom === commande.source.nom &&
+            source.pos.lig === commande.source.pos.lig &&
+            source.pos.col === commande.source.pos.col
+        );
+    }) || null;
+}
+
+function commandeJeuValide(commande) {
+    if (!commande || commande.version !== 1) {
+        return false;
+    }
+
+    if (commande.acteur !== "corsaire" && commande.acteur !== "pirate") {
+        return false;
+    }
+
+    return commande.type === "avancer" || commande.type === "tirer";
+}
+
+function executerCommandeJeu(commande, origine) {
+    origine = origine || "local";
+
+    if (!commandeJeuValide(commande)) {
+        afficherMessageAction("Commande de jeu refusée : format inconnu.");
+        return false;
+    }
+
+    derniereCommandeJeu = cloneSimple(commande);
+
+    if (commande.type === "avancer") {
+        const action = construireActionDeplacement(
+            commande.acteur,
+            piloteActeur(commande.acteur),
+            commande.destination
+        );
+
+        action.commandeJeu = cloneSimple(commande);
+        action.origineCommande = origine;
+
+        executerAction(action);
+        return true;
+    }
+
+    if (commande.type === "tirer") {
+        const source = retrouverSourceTirDepuisCommande(commande);
+
+        if (!source) {
+            afficherMessageAction(
+                "Commande tirer refusée : la source de tir n'est plus disponible."
+            );
+            return false;
+        }
+
+        const action = construireActionTir(source, commande.cible);
+
+        action.commandeJeu = cloneSimple(commande);
+        action.origineCommande = origine;
+        action.aleaTirCommande = commande.aleaTir;
+        action.sourceChoisieAutomatiquement = true;
+        action.choixIA = "tir_humain_commande_partageable";
+        action.sourcesPossibles = [{
+            type: source.type,
+            nom: source.nom,
+            pos: {
+                lig: source.pos.lig,
+                col: source.pos.col
+            },
+            consommeTirBateau: source.consommeTirBateau
+        }];
+
+        executerActionTir(action);
+        return true;
+    }
+
+    return false;
+}
+
+
 function construireActionDeplacement(acteur, pilote, destination) {
     const departPos = positionBateau(acteur);
 
@@ -2344,6 +3300,7 @@ function executerAction(action) {
         // Cela laisse le temps au navigateur d'afficher clairement
         // le déplacement de Surcouf avant le tir ou le déplacement pirate.
         if (
+            MODE_IA_PIRATE &&
             action.autorisee &&
             action.acteur === "corsaire" &&
             action.pilote === "humain"
@@ -2369,8 +3326,11 @@ function executerAction(action) {
             return;
         }
 
-        // Pour les déplacements non humains, on garde le comportement immédiat.
-        declencherPirateIAApresDeplacementCorsaire(action);
+        // Pour les déplacements non humains, on garde le comportement immédiat,
+        // uniquement lorsque les automatismes pirates sont autorisés.
+        if (MODE_IA_PIRATE) {
+            declencherPirateIAApresDeplacementCorsaire(action);
+        }
     }
 }
 
@@ -2417,13 +3377,12 @@ function gererClicCanvas(event) {
     acteurSelectionne = acteurActif;
     sourceTirSelectionnee = null;
 
-    const action = construireActionDeplacement(
+    const commande = creerCommandeAvancer(
         acteurActif,
-        piloteActeur(acteurActif),
         pos
     );
 
-    executerAction(action);
+    executerCommandeLocaleEtDistance(commande);
 
     acteurSelectionne = acteurActif;
 }
@@ -2686,6 +3645,16 @@ function afficherDebugAction(action) {
     lignes.push("Action : " + action.type);
     lignes.push("Acteur : " + action.acteur);
     lignes.push("Pilote : " + action.pilote);
+
+    if (action.commandeJeu) {
+        lignes.push("Commande partageable : " + action.commandeJeu.type);
+        lignes.push("ID commande : " + action.commandeJeu.id);
+        lignes.push(
+            "Origine commande : " +
+            (action.origineCommande || "inconnue")
+        );
+    }
+
     lignes.push("");
 
     if (action.type === "deplacement") {
@@ -2732,6 +3701,10 @@ function afficherDebugAction(action) {
 
         if (action.resultat) {
             lignes.push("Résultat : " + action.resultat);
+        }
+
+        if (action.jetTirFourniParCommande) {
+            lignes.push("Jet de tir commun : fourni par la commande");
         }
 
         if (action.cibleBateau) {
@@ -4259,9 +5232,13 @@ function estTirDirectSurBateauAvecChance(action) {
 }
 
 function testerReussiteTirBateauContreBateau(action) {
-    const jet = Math.random();
+    const jet = Number.isFinite(action.aleaTirCommande)
+        ? action.aleaTirCommande
+        : Math.random();
 
     action.jetTirBateau = jet;
+    action.jetTirFourniParCommande =
+        Number.isFinite(action.aleaTirCommande);
     action.seuilTirBateau = CHANCE_TIR_BATEAU_CONTRE_BATEAU;
 
     return jet < CHANCE_TIR_BATEAU_CONTRE_BATEAU;
@@ -4777,7 +5754,9 @@ function gererClicDroitCanvas(event) {
         return;
     }
 
-    executerActionTir(action);
+    const commande = creerCommandeTirerDepuisAction(action);
+
+    executerCommandeLocaleEtDistance(commande);
 }
 
 function afficherSourceTirSelectionnee(source) {
@@ -5251,6 +6230,11 @@ function construireTirTerritoirePirate(territoireAlerte) {
 function activationTirsTerritoiresPirates() {
     timerTirsTerritoiresPirates = null;
 
+    if (!MODE_IA_PIRATE) {
+        arreterTirsTerritoiresPirates();
+        return;
+    }
+
     if (partieTerminee()) {
         arreterTirsTerritoiresPirates();
         return;
@@ -5330,7 +6314,7 @@ function planifierTirsTerritoiresPirates() {
         timerTirsTerritoiresPirates = null;
     }
 
-    if (!tirsTerritoiresPiratesActifs) {
+    if (!MODE_IA_PIRATE || !tirsTerritoiresPiratesActifs) {
         return;
     }
 
@@ -5341,6 +6325,11 @@ function planifierTirsTerritoiresPirates() {
 }
 
 function demarrerTirsTerritoiresPirates() {
+    if (!MODE_IA_PIRATE) {
+        arreterTirsTerritoiresPirates();
+        return;
+    }
+
     tirsTerritoiresPiratesActifs = true;
     tirTerritoirePirateEnCours = false;
     reinitialiserDelaiAlerteTerritoiresPirates();
@@ -8401,6 +9390,10 @@ function tirHumainCorsaireAutorise(action) {
 }
 
 function declencherPirateIAApresTirCorsaire(action) {
+    if (!MODE_IA_PIRATE) {
+        return;
+    }
+
     if (partieTerminee()) {
         return;
     }
@@ -8413,6 +9406,10 @@ function declencherPirateIAApresTirCorsaire(action) {
 }
 
 function planifierReponsePirateApresTirCorsaire(action, raison) {
+    if (!MODE_IA_PIRATE) {
+        return;
+    }
+
     if (!tirHumainCorsaireAutorise(action)) {
         return;
     }
@@ -8462,6 +9459,10 @@ function planifierReponsePirateApresTirCorsaire(action, raison) {
 }
 
 function declencherPirateIAApresDeplacementCorsaire(action) {
+    if (!MODE_IA_PIRATE) {
+        return;
+    }
+
     if (partieTerminee()) {
         return;
     }
@@ -8486,6 +9487,7 @@ function activationPirateIA() {
     }
 
     if (
+        !MODE_IA_PIRATE ||
         iaPirateEnCours ||
         !iaPirateActive ||
         pilotage.pirate !== "ia" ||
@@ -8562,11 +9564,26 @@ function planifierPirateIA() {
 }
 
 function demarrerPirateIA() {
+    if (!MODE_IA_PIRATE) {
+        arreterPirateIA();
+        return;
+    }
+
     iaPirateActive = true;
     iaPirateEnCours = false;
 }
 
 function arreterPirateIA() {
+    if (timerReponsePirateApresDeplacement !== null) {
+        clearTimeout(timerReponsePirateApresDeplacement);
+        timerReponsePirateApresDeplacement = null;
+    }
+
+    if (timerReponsePirateApresTirCorsaire !== null) {
+        clearTimeout(timerReponsePirateApresTirCorsaire);
+        timerReponsePirateApresTirCorsaire = null;
+    }
+
     iaPirateActive = false;
     iaPirateEnCours = false;
 }
@@ -8582,11 +9599,19 @@ function afficherDebugEtatPartie() {
 
     lignes.push("Acteur actif : " + nomAfficheActeur(acteurActif));
     lignes.push("Pilotage : Surcouf = " + pilotage.corsaire + " | Barbe-Noire = " + pilotage.pirate);
-    lignes.push("IA Pirate : répond après déplacement ou tir de Surcouf");
     lignes.push(
-        "Batteries pirates : si Surcouf est à 1 case, tir aléatoire toutes les " +
-        (DELAI_TIR_TERRITOIRE_PIRATE_MS / 1000) +
-        " s"
+        "IA Pirate : " +
+        (MODE_IA_PIRATE
+            ? "active — répond après déplacement ou tir de Surcouf"
+            : "désactivée — aucune action automatique")
+    );
+    lignes.push(
+        "Batteries pirates : " +
+        (MODE_IA_PIRATE
+            ? "actives ; si Surcouf est à 1 case, tir aléatoire toutes les " +
+              (DELAI_TIR_TERRITOIRE_PIRATE_MS / 1000) +
+              " s"
+            : "désactivées")
     );
     const alertesBatteries = territoiresPiratesAlertes();
     lignes.push(
@@ -8883,6 +9908,7 @@ function appliquerParametres() {
 
     fermerParametres();
     mettreAJourBoutonActeurActif();
+    mettreAJourBoutonModeIAPirate();
     dessinerGeographie();
     demarrerPirateIA();
     demarrerTirsTerritoiresPirates();
@@ -8890,7 +9916,10 @@ function appliquerParametres() {
 
     afficherMessageAction(
         "Paramètres validés. Nouvelle partie lancée avec le même archipel. " +
-        "Recharges et réparations séparées entre port et territoire."
+        "Recharges et réparations séparées entre port et territoire. " +
+        (MODE_IA_PIRATE
+            ? "IA Pirate et batteries actives."
+            : "IA Pirate et batteries automatiques désactivées.")
     );
 }
 
@@ -8996,11 +10025,16 @@ function nouvellePartieMemeArchipel() {
     derniereAction = null;
     reinitialiserEffetsVisuels();
     mettreAJourBoutonActeurActif();
+    mettreAJourBoutonModeIAPirate();
     dessinerGeographie();
     demarrerPirateIA();
     demarrerTirsTerritoiresPirates();
     demarrerHornTresor();
-    afficherMessageAction("Nouvelle partie : Surcouf humain ; Barbe-Noire IA attend les déplacements ou tirs de Surcouf. Batteries pirates actives. Tir direct sur bateau : 1 chance sur 3.");
+    afficherMessageAction(
+        MODE_IA_PIRATE
+            ? "Nouvelle partie : Surcouf humain ; Barbe-Noire IA attend les déplacements ou tirs de Surcouf. Batteries pirates actives. Tir direct sur bateau : 1 chance sur 3."
+            : "Nouvelle partie sans IA Pirate : Surcouf reste entièrement jouable ; Barbe-Noire et ses batteries automatiques restent muets."
+    );
 }
 
 function nouvelleGrilleNouvelArchipel() {
@@ -9027,14 +10061,42 @@ function nouvelleGrilleNouvelArchipel() {
     derniereAction = null;
     reinitialiserEffetsVisuels();
     mettreAJourBoutonActeurActif();
+    mettreAJourBoutonModeIAPirate();
     dessinerGeographie();
     demarrerPirateIA();
     demarrerTirsTerritoiresPirates();
     demarrerHornTresor();
-    afficherMessageAction("Nouvelle grille : nouvel archipel ; batteries pirates actives.");
+    afficherMessageAction(
+        MODE_IA_PIRATE
+            ? "Nouvelle grille : nouvel archipel ; batteries pirates actives."
+            : "Nouvelle grille : nouvel archipel ; IA Pirate et batteries automatiques désactivées."
+    );
 }
 
+document.getElementById("btnCreerPartieDistance").addEventListener("click", function() {
+    creerPartieDistance();
+});
+
+document.getElementById("btnRejoindrePartieDistance").addEventListener("click", function() {
+    rejoindrePartieDistance();
+});
+
+document.getElementById("codePartieDistance").addEventListener("input", function(event) {
+    event.target.value = normaliserCodePartieDistance(event.target.value);
+});
+
+document.getElementById("codePartieDistance").addEventListener("keydown", function(event) {
+    if (event.key === "Enter") {
+        rejoindrePartieDistance();
+    }
+});
+
 document.getElementById("btnNouvellePartie").addEventListener("click", function() {
+    if (modeDistance) {
+        quitterPartieDistance();
+        return;
+    }
+
     nouvellePartieMemeArchipel();
 });
 
@@ -9044,6 +10106,14 @@ document.getElementById("btnNouvelleGrille").addEventListener("click", function(
 
 document.getElementById("btnParametres").addEventListener("click", function() {
     ouvrirParametres();
+});
+
+document.getElementById("btnModeIAPirate").addEventListener("click", function() {
+    basculerModeIAPirate();
+});
+
+document.getElementById("btnPiloteLocal").addEventListener("click", function() {
+    changerActeurActif();
 });
 
 document.getElementById("btnActeurActif").addEventListener("click", function() {
@@ -9327,11 +10397,16 @@ chargerImages(function() {
     recalculerPorteCordonProcheSurcouf("lancement initial");
     acteurActif = "corsaire";
     mettreAJourBoutonActeurActif();
+    mettreAJourBoutonModeIAPirate();
     dessinerGeographie();
     demarrerPirateIA();
     demarrerTirsTerritoiresPirates();
     demarrerHornTresor();
-    afficherMessageAction("Surcouf humain. Barbe-Noire IA attend les déplacements ou tirs de Surcouf. Batteries pirates actives. Tir direct sur bateau : 1 chance sur 3. Déplacement : clic gauche. Tir : clic droit ou appui long sur tablette.");
+    afficherMessageAction(
+        MODE_IA_PIRATE
+            ? "Surcouf humain. Barbe-Noire IA attend les déplacements ou tirs de Surcouf. Batteries pirates actives. Tir direct sur bateau : 1 chance sur 3. Déplacement : clic gauche. Tir : clic droit ou appui long sur tablette."
+            : "Test sans IA Pirate : Surcouf humain et entièrement jouable. Barbe-Noire et les batteries pirates automatiques sont muets. Déplacement : clic gauche. Tir : clic droit ou appui long sur tablette."
+    );
 });
 
 </script>
