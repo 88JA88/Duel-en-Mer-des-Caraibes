@@ -987,8 +987,8 @@ function mettreAJourBoutonModeIAPirate() {
     bouton.disabled = modeDistance;
 
     bouton.innerHTML = MODE_IA_PIRATE
-        ? "IA Pirate : AVEC<br><small>Barbe-Noire et batteries actifs</small>"
-        : "IA Pirate : SANS<br><small>Barbe-Noire et batteries muets</small>";
+        ? "Pirate : IA<br><small>Barbe-Noire et batteries actifs</small>"
+        : "Pirate : Flibustier<br><small>Barbe-Noire et batteries muets</small>";
 }
 
 function basculerModeIAPirate() {
@@ -7209,6 +7209,189 @@ function signalerChangementProprietaireTerritoirePourCordon(nomTerritoire, ancie
         detailsEffets
     );
 }
+// v264 — la porte stratégique n'est plus choisie seulement parce qu'elle
+// est proche de Surcouf. On cherche d'abord un itinéraire réellement praticable
+// et non protégé par les batteries pirates jusqu'à l'île.
+// Le cordon historique reste intact et sert de solution de repli.
+function casePraticableItineraireNonProtege(pos, depart, cible) {
+    if (!positionDansGrille(pos)) {
+        return false;
+    }
+
+    // Le point de départ peut déjà se trouver dans une zone dangereuse.
+    // L'île reste une destination autorisée et invulnérable.
+    if (memePosition(pos, depart) || memePosition(pos, cible)) {
+        return casePraticablePourSurcoufAnalyse(pos);
+    }
+
+    if (!casePraticablePourSurcoufAnalyse(pos)) {
+        return false;
+    }
+
+    return !caseProtegeeParTirTerritoirePirate(pos);
+}
+
+function calculerDistancesItineraireNonProtege(depart, cibleAutorisee) {
+    const distances = new Map();
+    const file = [{ lig: depart.lig, col: depart.col }];
+    let indexLecture = 0;
+
+    distances.set(cleCoord(depart), 0);
+
+    while (indexLecture < file.length) {
+        const courant = file[indexLecture++];
+        const distanceCourante = distances.get(cleCoord(courant));
+        const voisines = positionsDansRayonCases(courant, 1);
+
+        for (const voisine of voisines) {
+            if (memePosition(voisine, courant)) {
+                continue;
+            }
+
+            const cleVoisine = cleCoord(voisine);
+
+            if (distances.has(cleVoisine)) {
+                continue;
+            }
+
+            if (!casePraticableItineraireNonProtege(voisine, depart, cibleAutorisee)) {
+                continue;
+            }
+
+            distances.set(cleVoisine, distanceCourante + 1);
+            file.push({ lig: voisine.lig, col: voisine.col });
+        }
+    }
+
+    return distances;
+}
+
+function trouverPassageStrategiqueParItineraire(posReference, cordon) {
+    const ile = {
+        lig: geographie.ile.lig,
+        col: geographie.ile.col
+    };
+
+    const distancesDepuisSurcouf = calculerDistancesItineraireNonProtege(
+        posReference,
+        ile
+    );
+    const distancesDepuisIle = calculerDistancesItineraireNonProtege(
+        ile,
+        posReference
+    );
+
+    const distanceTotaleMin = distancesDepuisSurcouf.get(cleCoord(ile));
+
+    if (typeof distanceTotaleMin !== "number") {
+        return null;
+    }
+
+    const distanceAnneau = (
+        cordon && typeof cordon.distanceIleMinPortes === "number"
+    )
+        ? cordon.distanceIleMinPortes
+        : 2;
+
+    const distanceAnneauMax = (
+        cordon && typeof cordon.seuilDistanceIlePortesInterieures === "number"
+    )
+        ? cordon.seuilDistanceIlePortesInterieures
+        : distanceAnneau + 1;
+
+    const candidates = [];
+
+    for (let lig = 1; lig <= GRID_ROWS; lig++) {
+        for (let col = 1; col <= GRID_COLS; col++) {
+            const pos = { lig: lig, col: col };
+            const caseInfo = analyserCase(pos);
+
+            // Une porte stratégique est une case de mer libre et non protégée.
+            if (caseInfo.nature !== "mer") {
+                continue;
+            }
+
+            if (caseProtegeeParTirTerritoirePirate(pos)) {
+                continue;
+            }
+
+            const distanceIle = distanceCases(pos, ile);
+
+            if (distanceIle < distanceAnneau || distanceIle > distanceAnneauMax) {
+                continue;
+            }
+
+            const distanceSurcouf = distancesDepuisSurcouf.get(cleCoord(pos));
+            const distanceRouteIle = distancesDepuisIle.get(cleCoord(pos));
+
+            if (
+                typeof distanceSurcouf !== "number" ||
+                typeof distanceRouteIle !== "number"
+            ) {
+                continue;
+            }
+
+            const longueurItineraire = distanceSurcouf + distanceRouteIle;
+            const detourItineraire = longueurItineraire - distanceTotaleMin;
+
+            // On conserve le plus court itinéraire sûr et une marge d'une case,
+            // pour éviter qu'un simple détour équivalent change brutalement la porte.
+            if (detourItineraire > 1) {
+                continue;
+            }
+
+            candidates.push({
+                pos: pos,
+                distanceSurcouf: distanceSurcouf,
+                distancePirate: distanceCases(positionBateau("pirate"), pos),
+                distanceIle: distanceIle,
+                distanceRouteIle: distanceRouteIle,
+                longueurItineraire: longueurItineraire,
+                distanceTotaleMin: distanceTotaleMin,
+                detourItineraire: detourItineraire,
+                ecartAnneau: Math.abs(distanceIle - distanceAnneau),
+                porteInterieure: (
+                    cordon &&
+                    cordon.portesInterieures &&
+                    cordon.portesInterieures.some(function(p) {
+                        return memePosition(p.pos, pos);
+                    })
+                ),
+                methodeSelection: "itineraire_non_protege",
+                versionCordon: versionCordonDefensifPirate
+            });
+        }
+    }
+
+    candidates.sort(function(a, b) {
+        if (a.detourItineraire !== b.detourItineraire) {
+            return a.detourItineraire - b.detourItineraire;
+        }
+
+        if (a.ecartAnneau !== b.ecartAnneau) {
+            return a.ecartAnneau - b.ecartAnneau;
+        }
+
+        // À itinéraire égal, Barbe-Noire choisit le passage qu'il peut défendre
+        // le plus vite, sans modifier sa logique de déplacement existante.
+        if (a.distancePirate !== b.distancePirate) {
+            return a.distancePirate - b.distancePirate;
+        }
+
+        if (a.distanceSurcouf !== b.distanceSurcouf) {
+            return a.distanceSurcouf - b.distanceSurcouf;
+        }
+
+        if (a.pos.lig !== b.pos.lig) {
+            return a.pos.lig - b.pos.lig;
+        }
+
+        return a.pos.col - b.pos.col;
+    });
+
+    return candidates.length > 0 ? candidates[0] : null;
+}
+
 function calculerPorteCordonLaPlusProcheDe(posReference) {
     const cordon = obtenirCordonDefensifPirate();
 
@@ -7216,6 +7399,17 @@ function calculerPorteCordonLaPlusProcheDe(posReference) {
         return null;
     }
 
+    const passageItineraire = trouverPassageStrategiqueParItineraire(
+        posReference,
+        cordon
+    );
+
+    if (passageItineraire) {
+        return passageItineraire;
+    }
+
+    // Repli conservateur : si aucun itinéraire entièrement non protégé n'existe,
+    // on reprend exactement le choix historique de la porte intérieure proche.
     const portesReference = (
         cordon.portesInterieures &&
         cordon.portesInterieures.length > 0
@@ -7240,6 +7434,7 @@ function calculerPorteCordonLaPlusProcheDe(posReference) {
                     return memePosition(p.pos, porte.pos);
                 })
             ),
+            methodeSelection: "repli_porte_cordon_historique",
             versionCordon: versionCordonDefensifPirate
         };
     });
@@ -7320,6 +7515,11 @@ function resumerPorteCordonProcheSurcouf() {
         porte.distancePirate +
         " | dist. île " +
         porte.distanceIle +
+        (typeof porte.detourItineraire === "number"
+            ? " | détour sûr " + porte.detourItineraire
+            : "") +
+        " | méthode " +
+        (porte.methodeSelection || "cordon") +
         " | intérieure " +
         (porte.porteInterieure ? "oui" : "non") +
         " | version cordon " +
@@ -7754,7 +7954,7 @@ function ajouterResumePerimetrePirateDansAction(action) {
         portesIle.seuilDistanceIlePortesInterieures
     );
     action.detailsEffets.push(
-        "Porte stratégique retenue près de Surcouf : " +
+        "Passage stratégique retenu sur itinéraire vers l’île : " +
         resumerPorteCordonProcheSurcouf()
     );
     action.detailsEffets.push(
@@ -8897,7 +9097,7 @@ function listerIntentionsPirate(analyse) {
                 "P1_2_2_HORS_PERIMETRE",
                 "defendre_porte_entree_cordon",
                 analyse.porteCordonProcheSurcouf.pos,
-                "Aucune opportunité territoriale/recharge prioritaire ; Surcouf sans trésor est dehors, Barbe-Noire défend la porte intérieure proche"
+                "Aucune opportunité territoriale/recharge prioritaire ; Surcouf sans trésor est dehors, Barbe-Noire défend le passage stratégique de l’itinéraire non protégé"
             ));
             intentions.push(creerIntentionPirate(
                 "P1_3",
