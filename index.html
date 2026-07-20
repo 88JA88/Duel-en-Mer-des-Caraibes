@@ -124,18 +124,44 @@
     }
 
     .zone-distance.connectee #btnCreerPartieDistance,
-    .zone-distance.connectee #codePartieDistance,
     .zone-distance.connectee #btnRejoindrePartieDistance {
         display: none;
     }
 
+    #codeAfficheDistance {
+        display: none;
+    }
+
+    /* Une fois la partie créée ou rejointe, le champ de saisie disparaît
+       et le code est affiché avec une explication claire. */
+    .zone-distance.connectee #codePartieDistance {
+        display: none;
+    }
+
+    .zone-distance.connectee #codeAfficheDistance {
+        display: flex;
+        grid-column: 1 / 2;
+        align-items: center;
+        justify-content: center;
+        box-sizing: border-box;
+        min-height: 42px;
+        margin: 0;
+        padding: 8px 10px;
+        border: 1px solid #777;
+        border-radius: 6px;
+        background: #ffffff;
+        font-size: 17px;
+        font-weight: bold;
+        text-align: center;
+    }
+
     .zone-distance.connectee #btnQuitterPartieDistance {
         display: block;
-        grid-column: 1 / 3;
+        grid-column: 2 / 4;
     }
 
     .zone-distance.connectee #btnReglesJeuDistance {
-        grid-column: 3 / 5;
+        grid-column: 4 / 5;
     }
 
     .zone-distance input {
@@ -416,6 +442,7 @@
         grid-template-columns: repeat(2, minmax(150px, 1fr));
     }
 
+    .zone-distance.connectee #codePartieDistance,
     .zone-distance.connectee #btnQuitterPartieDistance,
     .zone-distance.connectee #btnReglesJeuDistance {
         grid-column: auto;
@@ -593,6 +620,8 @@
                 placeholder="CODE"
                 aria-label="Code de la partie"
             >
+
+            <p id="codeAfficheDistance" aria-live="polite"></p>
 
             <button id="btnRejoindrePartieDistance" type="button">
                 Rejoindre<br><small>je serai Barbe-Noire</small>
@@ -843,7 +872,7 @@ let sourceTirSelectionnee = null;
 let compteurCommandesJeu = 0;
 let derniereCommandeJeu = null;
 
-// v265 — interface simplifiée : choix entre mode local à un joueur et mode distant à deux joueurs.
+// v267 — correction de l’affichage du code après création : choix entre mode local à un joueur et mode distant à deux joueurs.
 // La sortie propre Firebase de la v263 et le calcul stratégique de la v264 sont conservés.
 // En mode distant connecté, une commande dédiée « Quitter la partie » remplace les commandes de préparation.
 // Le départ de l'un des joueurs est signalé à l'autre appareil, puis chacun
@@ -2332,6 +2361,7 @@ function mettreAJourInterfaceDistance() {
     const boutonCreer = document.getElementById("btnCreerPartieDistance");
     const boutonRejoindre = document.getElementById("btnRejoindrePartieDistance");
     const champCode = document.getElementById("codePartieDistance");
+    const codeAffiche = document.getElementById("codeAfficheDistance");
     const boutonQuitter = document.getElementById("btnQuitterPartieDistance");
 
     if (boutonCreer) {
@@ -2349,6 +2379,16 @@ function mettreAJourInterfaceDistance() {
             champCode.value = codePartieDistance;
         } else if (!modeDistance) {
             champCode.value = "";
+        }
+    }
+
+    if (codeAffiche) {
+        if (modeDistance && codePartieDistance) {
+            codeAffiche.textContent = monRoleDistance === "corsaire"
+                ? "Code à transmettre : " + codePartieDistance
+                : "Code de la partie : " + codePartieDistance;
+        } else {
+            codeAffiche.textContent = "";
         }
     }
 
