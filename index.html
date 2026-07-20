@@ -88,14 +88,54 @@
         font-size: 18px;
     }
 
+    .choix-mode-jeu {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(220px, 1fr));
+        gap: 10px;
+        margin-bottom: 12px;
+    }
+
+    .bouton-mode-jeu[aria-pressed="true"] {
+        border: 2px solid #1e5a88;
+        background: #a9d8ff;
+        font-weight: bold;
+    }
+
+    .interface-cachee {
+        display: none !important;
+    }
+
+    .interface-technique-cachee {
+        display: none;
+    }
+
     .zone-distance {
         display: grid;
-        grid-template-columns: minmax(150px, 1fr) minmax(120px, 180px) minmax(150px, 1fr);
+        grid-template-columns: minmax(150px, 1fr) minmax(120px, 180px) minmax(150px, 1fr) minmax(150px, 1fr);
         gap: 10px;
         align-items: stretch;
         margin-top: 12px;
         padding-top: 12px;
         border-top: 1px solid #c8d5e0;
+    }
+
+    #btnQuitterPartieDistance {
+        display: none;
+    }
+
+    .zone-distance.connectee #btnCreerPartieDistance,
+    .zone-distance.connectee #codePartieDistance,
+    .zone-distance.connectee #btnRejoindrePartieDistance {
+        display: none;
+    }
+
+    .zone-distance.connectee #btnQuitterPartieDistance {
+        display: block;
+        grid-column: 1 / 3;
+    }
+
+    .zone-distance.connectee #btnReglesJeuDistance {
+        grid-column: 3 / 5;
     }
 
     .zone-distance input {
@@ -122,7 +162,7 @@
 
     .boutons-jeu {
         display: grid;
-        grid-template-columns: repeat(6, minmax(130px, 1fr));
+        grid-template-columns: repeat(4, minmax(150px, 1fr));
         gap: 10px;
         align-items: stretch;
     }
@@ -370,13 +410,22 @@
         padding: 10px;
     }
 
-    .boutons-jeu {
+    .choix-mode-jeu,
+    .boutons-jeu,
+    .zone-distance {
         grid-template-columns: repeat(2, minmax(150px, 1fr));
+    }
+
+    .zone-distance.connectee #btnQuitterPartieDistance,
+    .zone-distance.connectee #btnReglesJeuDistance {
+        grid-column: auto;
     }
 }
 
 @media (max-width: 520px) {
-    .boutons-jeu {
+    .choix-mode-jeu,
+    .boutons-jeu,
+    .zone-distance {
         grid-template-columns: 1fr;
     }
 }
@@ -514,20 +563,23 @@
     <div class="panel">
         <h2>Jeu</h2>
 
-        <div class="boutons-jeu">
+        <div class="choix-mode-jeu" aria-label="Choix du mode de jeu">
+            <button id="btnChoisirModeLocal" class="bouton-mode-jeu" type="button" aria-pressed="false">
+                Mode local à un joueur<br><small>je suis Surcouf contre Barbe-Noire</small>
+            </button>
+            <button id="btnChoisirModeDistance" class="bouton-mode-jeu" type="button" aria-pressed="false">
+                Mode distant à deux joueurs
+            </button>
+        </div>
+
+        <div id="zoneCommandesLocal" class="boutons-jeu interface-cachee" aria-label="Commandes du mode local">
             <button id="btnNouvellePartie">Nouvelle partie<br><small>même archipel</small></button>
             <button id="btnNouvelleGrille">Nouvelle grille<br><small>nouvel archipel</small></button>
             <button id="btnParametres">Paramètres<br><small>quotas, tirs, bateaux</small></button>
             <button id="btnReglesJeu">Règles du jeu<br><small>objectif, clics, territoires</small></button>
-            <button id="btnModeIAPirate" type="button" aria-pressed="false">
-                IA Pirate : SANS<br><small>Barbe-Noire et batteries muets</small>
-            </button>
-            <button id="btnPiloteLocal" type="button">
-                Je suis Surcouf<br><small>clic pour changer de rôle</small>
-            </button>
         </div>
 
-        <div class="zone-distance" aria-label="Partie à distance">
+        <div id="zoneCommandesDistance" class="zone-distance interface-cachee" aria-label="Partie à distance">
             <button id="btnCreerPartieDistance" type="button">
                 Créer une partie<br><small>je serai Surcouf</small>
             </button>
@@ -546,9 +598,22 @@
                 Rejoindre<br><small>je serai Barbe-Noire</small>
             </button>
 
+            <button id="btnQuitterPartieDistance" type="button">
+                Quitter la partie<br><small>retour au choix du mode</small>
+            </button>
+
+            <button id="btnReglesJeuDistance" type="button">
+                Règles du jeu<br><small>objectif, clics, territoires</small>
+            </button>
+
             <p id="etatConnexionDistance" class="etat-distance">
-                Mode local
+                Choisissez Créer ou Rejoindre
             </p>
+        </div>
+
+        <div class="interface-technique-cachee" aria-hidden="true">
+            <button id="btnModeIAPirate" type="button" aria-pressed="false"></button>
+            <button id="btnPiloteLocal" type="button"></button>
         </div>
 
         <label class="curseur-case" for="tailleCase">
@@ -778,8 +843,9 @@ let sourceTirSelectionnee = null;
 let compteurCommandesJeu = 0;
 let derniereCommandeJeu = null;
 
-// v263 — sortie propre d'une partie Firebase.
-// En mode distant, le bouton "Nouvelle partie" devient "Quitter la partie".
+// v265 — interface simplifiée : choix entre mode local à un joueur et mode distant à deux joueurs.
+// La sortie propre Firebase de la v263 et le calcul stratégique de la v264 sont conservés.
+// En mode distant connecté, une commande dédiée « Quitter la partie » remplace les commandes de préparation.
 // Le départ de l'un des joueurs est signalé à l'autre appareil, puis chacun
 // revient au mode local. La synchronisation des commandes reste celle de v262.
 const CHEMIN_FIREBASE_CARAIBES = "caraibes";
@@ -792,6 +858,7 @@ const idAppareilDistance = (
 let firebaseCharge = null;
 let firebaseDb = null;
 let firebaseOutils = null;
+let modeInterfaceJeu = null;
 let modeDistance = false;
 let codePartieDistance = null;
 let monRoleDistance = null;
@@ -2178,12 +2245,94 @@ function importerParametresPartie(parametres) {
     });
 }
 
+function mettreAJourInterfaceModesJeu() {
+    const modeLocal = modeInterfaceJeu === "local";
+    const modeDistant = modeInterfaceJeu === "distance";
+    const boutonModeLocal = document.getElementById("btnChoisirModeLocal");
+    const boutonModeDistance = document.getElementById("btnChoisirModeDistance");
+    const zoneLocal = document.getElementById("zoneCommandesLocal");
+    const zoneDistance = document.getElementById("zoneCommandesDistance");
+
+    if (boutonModeLocal) {
+        boutonModeLocal.setAttribute("aria-pressed", modeLocal ? "true" : "false");
+        boutonModeLocal.disabled = modeDistance || sortieDistanceEnCours;
+    }
+
+    if (boutonModeDistance) {
+        boutonModeDistance.setAttribute("aria-pressed", modeDistant ? "true" : "false");
+        boutonModeDistance.disabled = modeDistance || sortieDistanceEnCours;
+    }
+
+    if (zoneLocal) {
+        zoneLocal.classList.toggle("interface-cachee", !modeLocal);
+    }
+
+    if (zoneDistance) {
+        zoneDistance.classList.toggle("interface-cachee", !modeDistant);
+        zoneDistance.classList.toggle("connectee", modeDistance);
+    }
+}
+
+function choisirModeLocalUnJoueur() {
+    if (modeDistance || sortieDistanceEnCours) {
+        return;
+    }
+
+    modeInterfaceJeu = "local";
+    MODE_IA_PIRATE = true;
+    acteurActif = "corsaire";
+    pilotage.corsaire = "humain";
+    pilotage.pirate = "ia";
+    acteurSelectionne = null;
+    sourceTirSelectionnee = null;
+
+    demarrerPirateIA();
+    demarrerTirsTerritoiresPirates();
+
+    mettreAJourBoutonModeIAPirate();
+    mettreAJourBoutonActeurActif();
+    mettreAJourInterfaceDistance();
+    dessinerGeographie();
+
+    afficherEtatConnexionDistance("Mode local à un joueur");
+    afficherMessageAction(
+        "Mode local à un joueur : vous pilotez Surcouf ; Barbe-Noire et les batteries pirates sont automatiques."
+    );
+}
+
+function choisirModeDistanceDeuxJoueurs() {
+    if (modeDistance || sortieDistanceEnCours) {
+        return;
+    }
+
+    modeInterfaceJeu = "distance";
+    MODE_IA_PIRATE = false;
+    arreterPirateIA();
+    arreterTirsTerritoiresPirates();
+
+    pilotage.corsaire = "attente";
+    pilotage.pirate = "attente";
+    acteurActif = "corsaire";
+    acteurSelectionne = null;
+    sourceTirSelectionnee = null;
+
+    mettreAJourBoutonModeIAPirate();
+    mettreAJourBoutonActeurActif();
+    mettreAJourInterfaceDistance();
+    dessinerGeographie();
+
+    afficherEtatConnexionDistance("Créez une partie ou saisissez un code à 4 chiffres");
+    afficherMessageAction(
+        "Mode distant à deux joueurs : créez une partie ou rejoignez-la avec son code."
+    );
+}
+
 function mettreAJourInterfaceDistance() {
     const verrouille = modeDistance;
     const boutonCreer = document.getElementById("btnCreerPartieDistance");
     const boutonRejoindre = document.getElementById("btnRejoindrePartieDistance");
     const champCode = document.getElementById("codePartieDistance");
-    const boutonNouvellePartie = document.getElementById("btnNouvellePartie");
+    const boutonQuitter = document.getElementById("btnQuitterPartieDistance");
 
     if (boutonCreer) {
         boutonCreer.disabled = verrouille;
@@ -2203,14 +2352,12 @@ function mettreAJourInterfaceDistance() {
         }
     }
 
-    if (boutonNouvellePartie) {
-        boutonNouvellePartie.disabled = sortieDistanceEnCours;
-        boutonNouvellePartie.innerHTML = modeDistance
-            ? "Quitter la partie<br><small>retour au mode local</small>"
-            : "Nouvelle partie<br><small>même archipel</small>";
+    if (boutonQuitter) {
+        boutonQuitter.disabled = sortieDistanceEnCours;
     }
 
     [
+        "btnNouvellePartie",
         "btnNouvelleGrille",
         "btnParametres",
         "btnModeIAPirate",
@@ -2223,6 +2370,8 @@ function mettreAJourInterfaceDistance() {
             element.disabled = verrouille;
         }
     });
+
+    mettreAJourInterfaceModesJeu();
 }
 
 function quitterModeDistanceLocalement(message) {
@@ -2236,6 +2385,7 @@ function quitterModeDistanceLocalement(message) {
         arreterEcouteCommandesDistance = null;
     }
 
+    modeInterfaceJeu = null;
     modeDistance = false;
     codePartieDistance = null;
     monRoleDistance = null;
@@ -2247,8 +2397,8 @@ function quitterModeDistanceLocalement(message) {
     arreterPirateIA();
     arreterTirsTerritoiresPirates();
 
-    pilotage.corsaire = "humain";
-    pilotage.pirate = "humain";
+    pilotage.corsaire = "attente";
+    pilotage.pirate = "attente";
     acteurActif = "corsaire";
     acteurSelectionne = null;
     sourceTirSelectionnee = null;
@@ -2258,8 +2408,10 @@ function quitterModeDistanceLocalement(message) {
     mettreAJourInterfaceDistance();
     dessinerGeographie();
 
-    afficherEtatConnexionDistance(message || "Mode local");
-    afficherMessageAction(message || "Retour au mode local.");
+    afficherEtatConnexionDistance(message || "Partie quittée — choisissez un mode de jeu");
+    afficherMessageAction(
+        message || "Partie quittée. Choisissez le mode local ou le mode distant."
+    );
 }
 
 async function quitterPartieDistance() {
@@ -2297,7 +2449,7 @@ async function quitterPartieDistance() {
         setTimeout(function() {
             if (modeDistance && sortieDistanceEnCours) {
                 quitterModeDistanceLocalement(
-                    "Vous avez quitté la partie — mode local"
+                    "Vous avez quitté la partie — choisissez un mode de jeu"
                 );
             }
         }, 700);
@@ -2311,6 +2463,7 @@ async function quitterPartieDistance() {
 }
 
 function appliquerRoleDistanceLocal(role) {
+    modeInterfaceJeu = "distance";
     modeDistance = true;
     monRoleDistance = role;
 
@@ -2386,8 +2539,8 @@ function ecouterEtatPartieDistance() {
 
                 quitterModeDistanceLocalement(
                     estMonDepart
-                        ? "Vous avez quitté la partie — mode local"
-                        : nomDepart + " a quitté la partie — mode local"
+                        ? "Vous avez quitté la partie — choisissez un mode de jeu"
+                        : nomDepart + " a quitté la partie — choisissez un mode de jeu"
                 );
                 return;
             }
@@ -10273,6 +10426,14 @@ function nouvelleGrilleNouvelArchipel() {
     );
 }
 
+document.getElementById("btnChoisirModeLocal").addEventListener("click", function() {
+    choisirModeLocalUnJoueur();
+});
+
+document.getElementById("btnChoisirModeDistance").addEventListener("click", function() {
+    choisirModeDistanceDeuxJoueurs();
+});
+
 document.getElementById("btnCreerPartieDistance").addEventListener("click", function() {
     creerPartieDistance();
 });
@@ -10292,12 +10453,11 @@ document.getElementById("codePartieDistance").addEventListener("keydown", functi
 });
 
 document.getElementById("btnNouvellePartie").addEventListener("click", function() {
-    if (modeDistance) {
-        quitterPartieDistance();
-        return;
-    }
-
     nouvellePartieMemeArchipel();
+});
+
+document.getElementById("btnQuitterPartieDistance").addEventListener("click", function() {
+    quitterPartieDistance();
 });
 
 document.getElementById("btnNouvelleGrille").addEventListener("click", function() {
@@ -10551,6 +10711,10 @@ document.getElementById("btnReglesJeu").addEventListener("click", function() {
     ouvrirReglesJeu();
 });
 
+document.getElementById("btnReglesJeuDistance").addEventListener("click", function() {
+    ouvrirReglesJeu();
+});
+
 document.getElementById("btnFermerReglesJeu").addEventListener("click", function() {
     fermerReglesJeu();
 });
@@ -10596,16 +10760,19 @@ chargerImages(function() {
     recalculerCordonDefensifPirate("lancement initial");
     recalculerPorteCordonProcheSurcouf("lancement initial");
     acteurActif = "corsaire";
+    pilotage.corsaire = "attente";
+    pilotage.pirate = "attente";
+    MODE_IA_PIRATE = false;
+    arreterPirateIA();
+    arreterTirsTerritoiresPirates();
     mettreAJourBoutonActeurActif();
     mettreAJourBoutonModeIAPirate();
+    mettreAJourInterfaceDistance();
     dessinerGeographie();
-    demarrerPirateIA();
-    demarrerTirsTerritoiresPirates();
     demarrerHornTresor();
+    afficherEtatConnexionDistance("Choisissez un mode de jeu");
     afficherMessageAction(
-        MODE_IA_PIRATE
-            ? "Surcouf humain. Barbe-Noire IA attend les déplacements ou tirs de Surcouf. Batteries pirates actives. Tir direct sur bateau : 1 chance sur 3. Déplacement : clic gauche. Tir : clic droit ou appui long sur tablette."
-            : "Test sans IA Pirate : Surcouf humain et entièrement jouable. Barbe-Noire et les batteries pirates automatiques sont muets. Déplacement : clic gauche. Tir : clic droit ou appui long sur tablette."
+        "Choisissez : Mode local à un joueur ou Mode distant à deux joueurs."
     );
 });
 
